@@ -28,3 +28,25 @@ export function resolveRealPath(absolutePath: string): string | null {
     }
   }
 }
+
+/**
+ * Canonical spelling of a path, for callers that compare paths or use them as map keys.
+ *
+ * Two normalisations, both required for "one directory has exactly one spelling":
+ *   1. resolve, not normalize — normalize keeps a trailing separator, so `/a/b/` and `/a/b`
+ *      would yield two different strings for the same directory;
+ *   2. realpath — a symlink gives a directory a second path, whether it is the leaf
+ *      (`<root>/alias` -> `<root>/r1`) or an ancestor (`/data` -> `/mnt/data`).
+ *
+ * The only difference from resolveRealPath is that this never returns null: when the path
+ * cannot be resolved it falls back to the literal resolve rather than propagating "no answer".
+ * Callers here need a string they can compare; a null would force a branch at every call site,
+ * and every such branch is another chance for one directory to acquire two spellings.
+ *
+ * resolveRealPath keeps its null contract untouched — system_file.ts relies on it to decide a
+ * path is untrustworthy, which is a different question from "what do we call this directory".
+ */
+export function canonicalPath(target: string): string {
+  const resolved = path.resolve(target);
+  return resolveRealPath(resolved) ?? resolved;
+}

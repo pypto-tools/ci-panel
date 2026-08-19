@@ -12,8 +12,7 @@
 // 只在本进程内有效——这些入口都在同一个 daemon 里；下面「查表 + 占位」之间没有 await，
 // Node 单线程下不会被别的请求插进来，所以那一段是原子的。锁是内存态，daemon 重启即清空，
 // 不会残留死锁。
-import fs from "fs-extra";
-import path from "path";
+import { canonicalPath } from "../tools/path_link_check";
 
 export type RunnerOp = "delete" | "provision" | "service" | "env";
 
@@ -36,20 +35,14 @@ const OP_LABEL: Record<RunnerOp, string> = {
 //      两边各算各的 key 就等于没锁。assertUnderRoots 里比较边界时也是取 realpath，同一个理由。
 // realpath 对不存在的叶子会整条路径失败（provision 的目标目录尚未创建就是这种情况）。这时
 // 不能直接退回 resolve：只要有哪一层祖先是符号链接（`/data` → `/mnt/data` 这种），删除那侧
-// 目录存在、走 realpath，置备这侧走 resolve，同一个 runner 就又算出两个 key。所以先把父目录
-// 归一、再拼回叶子名，让 key 与「目录此刻在不在」无关。父目录也不存在才退回 resolve。
-export const dirKey = (dir: string): string => {
-  const resolved = path.resolve(dir);
-  try {
-    return `dir:${fs.realpathSync(resolved)}`;
-  } catch {
-    try {
-      return `dir:${path.join(fs.realpathSync(path.dirname(resolved)), path.basename(resolved))}`;
-    } catch {
-      return `dir:${resolved}`;
-    }
-  }
-};
+// 目录存在、走 realpath，置备这侧走 resolve，同一个 runner 就又算出两个 key。所以要上溯到
+// 最深的那个「存在的祖先」，解析它，再把剩下的字面段拼回来，让 key 与「目录此刻在不在」无关。
+//
+// 用 tools/path_link_check 的 canonicalPath，不在这里自己写一遍上溯：只上溯一层是不够的。
+// `<根>/新repo/新runner`（置备一个新仓库下的第一个 runner）两级都不存在，父目录那次 realpath
+// 也会失败；退回字面路径就等于没归一祖先软链，而它建好之后再来删走的是已存在那条路、算出的是
+// 解析过的路径——同一个 runner，置备一把锁、删除另一把。
+export const dirKey = (dir: string): string => `dir:${canonicalPath(dir)}`;
 export const serviceKey = (service: string): string => `svc:${service}`;
 
 const holders = new Map<string, RunnerOp>();

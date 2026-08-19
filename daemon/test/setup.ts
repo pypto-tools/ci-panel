@@ -2,8 +2,10 @@
 // service/log.ts 在模块加载时就重命名 logs/current.log 并挂一个 cwd 相对的 log4js appender,
 // system_instance.ts 则直接 fs.mkdirsSync('data/InstanceData')。
 //
-// 顺序很重要:CIP_SCAN_ROOTS 必须在任何 daemon 模块被 import 之前设好 ——
-// runner_scan.ts 在模块作用域就读它来定扫描根,晚一步就来不及了。
+// 顺序很重要:CIP_SCAN_ROOTS 与 CIP_RUNNER_SVC_HELPER 都必须在任何 daemon 模块被 import
+// 之前设好 —— runner_scan.ts 与 runner_provision.ts 都在模块作用域就把它们读走(前者定扫描根,
+// 后者定助手路径),晚一步就来不及了。setupFiles 整体先于 spec 的 import 求值,所以放在本文件里
+// 就够;但值若派生自 sandbox,就必须晚于下面那行 mkdtempSync。
 import fs from "fs-extra";
 import os from "os";
 import path from "path";
@@ -25,6 +27,16 @@ process.chdir(sandbox);
 const scanRoot = path.join(sandbox, "runners");
 process.env.CIP_SCAN_ROOTS = scanRoot;
 fs.mkdirsSync(scanRoot);
+
+// 特权助手指向一个不存在的路径,理由和 CIP_SCAN_ROOTS 是同一条:runner_provision.ts 在模块作用域
+// 就把它读走了(`export const RUNNER_SVC_HELPER = process.env.CIP_RUNNER_SVC_HELPER || "/usr/local/…"`),
+// 晚一步就来不及。值与 scripts/dev-lib.sh 的隔离约定保持一致。
+//
+// 挡的不是「测试会不会 spawn sudo」——它照样会 spawn,只是拿不到合法 preflight。挡的是
+// 开发机上真装了助手 + 配了免密 sudo 时,某条用例把宿主机的真单元操作掉:助手的
+// start|stop|restart 分支在目录校验(ALLOWED_ROOT / .runner)**之前**就 systemctl 并 exit,
+// root 那侧没有任何目录围栏能拦。而这台仓库的开发机上恰好跑着本项目自己的 runner 单元。
+process.env.CIP_RUNNER_SVC_HELPER = "/nonexistent/ci-panel-runner-svc";
 
 // 给用例用:拿扫描根,以及在根外造一个"根本够不着"的目录。
 export const SCAN_ROOT = scanRoot;

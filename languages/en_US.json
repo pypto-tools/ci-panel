@@ -1358,5 +1358,17 @@
   "TXT_CODE_RUNNER_BATCH_RETRY_TOKEN_PLACEHOLDER": "Re-enter the registration token to retry the failed items",
   "TXT_CODE_RUNNER_SCAN_COLLECT_TIP": "Scan the base directory and adopt runners that are registered (have .runner) but have no panel instance yet",
   "TXT_CODE_PROXY_UNSAFE_TARGET": "Proxy target is not allowed: only public http/https domains are permitted",
-  "TXT_CODE_PROXY_REQUEST_FAILED": "Proxy request failed; see the panel log for details"
+  "TXT_CODE_PROXY_REQUEST_FAILED": "Proxy request failed; see the panel log for details",
+  "TXT_CODE_RUNNER_NOT_MANAGED": "This runner is not managed by the panel; import it first.",
+  "TXT_CODE_RUNNER_ALREADY_RUNNING": "This runner is already running.",
+  "TXT_CODE_RUNNER_ALREADY_SUPERVISED": "A runner process outside the panel's control is already running here; refusing to start a second one.",
+  "TXT_CODE_RUNNER_FOREIGN_REFUSE": "This runner was not started by the panel, so the panel will not stop it.",
+  "TXT_CODE_RUNNER_CONFLICT_REFUSE": "More than one supervisor is running this runner; resolve the conflict first.",
+  "TXT_CODE_RUNNER_OBSERVE_INCOMPLETE": "This node could not determine what is running here; refusing to start until the check succeeds.",
+  "TXT_CODE_RUNNER_FOREIGN_RUNNING": "A runner process is still running in {{dir}} and the panel does not know how to stop it safely; stop it on the node first.",
+  "TXT_CODE_RUNNER_SUPERVISOR_NONE": "This node does not supervise runner processes; start and stop are unavailable.",
+  "TXT_CODE_RUNNER_LISTENER_ENV_UNAVAILABLE": "Listener environment variables are unavailable on this node.",
+  "TXT_CODE_RUNNER_SUPERVISOR_UNKNOWN": "Unknown runner supervisor: {{kind}}.",
+  "TXT_CODE_RUNNER_DETACH_HINT_SYSTEMD": "Stop and uninstall the runner unit on the node with the privileged helper, then retry.",
+  "TXT_CODE_RUNNER_DETACH_HINT_NONE": "Stop the runner process on the node where it was started, then retry."
 }

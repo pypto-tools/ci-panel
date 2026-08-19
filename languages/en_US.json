@@ -1369,6 +1369,11 @@
   "TXT_CODE_RUNNER_SUPERVISOR_NONE": "This node does not supervise runner processes; start and stop are unavailable.",
   "TXT_CODE_RUNNER_LISTENER_ENV_UNAVAILABLE": "Listener environment variables are unavailable on this node.",
   "TXT_CODE_RUNNER_SUPERVISOR_UNKNOWN": "Unknown runner supervisor: {{kind}}.",
+  "TXT_CODE_RUNNER_ACTION_UNSUPPORTED": "Unsupported runner action: {{action}}.",
+  "TXT_CODE_RUNNER_TARGET_REQUIRED": "A runner directory or a service name is required.",
+  "TXT_CODE_RUNNER_DIR_NOT_ABSOLUTE": "The runner directory must be an absolute path.",
+  "TXT_CODE_RUNNER_DIR_IS_ROOT": "The runner directory cannot be /.",
+  "TXT_CODE_RUNNER_SERVICE_NAME_INVALID": "Invalid systemd unit name: {{service}}.",
   "TXT_CODE_RUNNER_DETACH_HINT_SYSTEMD": "Stop and uninstall the runner unit on the node with the privileged helper, then retry.",
   "TXT_CODE_RUNNER_DETACH_HINT_NONE": "Stop the runner process on the node where it was started, then retry."
 }

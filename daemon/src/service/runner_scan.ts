@@ -42,7 +42,7 @@ import { canonicalPath } from "../tools/path_link_check";
 import { legacyManagedBy, legacySystemdState } from "./supervisor/legacy";
 import { scanListenerProcs } from "./supervisor/local_procs";
 import { toRuntimeState } from "./supervisor/ownership";
-import { observeAll, resolveSupervisor } from "./supervisor/resolve";
+import { isSupervisorAction, observeAll, resolveSupervisor } from "./supervisor/resolve";
 import { runUnitAction, stopBeforeUninstall } from "./supervisor/systemd";
 import type {
   RegisterRunnerItem,
@@ -649,9 +649,19 @@ export async function deleteRunner(
   dirRaw: string,
   opts: DeleteRunnerOptions = {}
 ): Promise<DeleteResult> {
-  const dir = path.normalize(String(dirRaw || ""));
-  // 严格校验：绝对路径、非根、必须在扫描根下、且看起来确实是 runner 目录——绝不误删别处
-  if (!path.isAbsolute(dir) || dir === "/") throw new Error("目录必须是绝对路径且不能是 /");
+  // 严格校验：绝对路径、非根、必须在扫描根下、且看起来确实是 runner 目录——绝不误删别处。
+  //
+  // canonicalPath 而不是 normalize：这个值往下要当锁的 key（dirKey）、要和实例的 cwd 比、
+  // 要和 busyRunnerDirs 的键比，而那三处都已经归一化过了。只 normalize 的话，一个符号链接
+  // 别名就能占到与 controlRunner 不同的 dirKey（删除与启停的互斥静默失效）、绕开 busy 拦截、
+  // 并把句柄实例留在面板里指着一个已经删掉的目录。
+  //
+  // 绝对性判在**原串**上、归一化之前：canonicalPath 内含 path.resolve，空串会被补成 daemon
+  // 的 cwd 并一路通过这道检查（顺序沿用 controlRunner）。
+  const raw = String(dirRaw || "");
+  if (!path.isAbsolute(raw)) throw new Error("目录必须是绝对路径且不能是 /");
+  const dir = canonicalPath(raw);
+  if (dir === "/") throw new Error("目录必须是绝对路径且不能是 /");
   // 走共享的 assertUnderRoots，别再从环境变量重推一份：扫描根的真相源是助手的 ALLOWED_ROOT，
   // 各自推各自的会让这条删除路径和其余路径的边界不一致。
   try {
@@ -769,7 +779,8 @@ async function runDelete(
   let instanceRemoved = false;
   try {
     for (const inst of InstanceSubsystem.instances.values()) {
-      if (inst?.config?.cwd && path.normalize(inst.config.cwd) === dir) {
+      // 两侧同源：dir 已 canonicalPath，实例 cwd 也必须走同一个函数（managedRunnerDirs 同此）
+      if (inst?.config?.cwd && canonicalPath(inst.config.cwd) === dir) {
         InstanceSubsystem.removeInstance(inst.instanceUuid, false); // 目录我们自己删，这里不删文件
         instanceRemoved = true;
         break;
@@ -824,11 +835,14 @@ export async function controlService(
   service: string,
   action: SupervisorAction
 ): Promise<{ settled: boolean }> {
-  // hasOwnProperty 而不是 in：action 来自调用方，别让 "toString" 这类原型链上的键蒙混过关
-  if (!Object.prototype.hasOwnProperty.call({ start: 1, stop: 1, restart: 1 }, action))
-    throw new Error(`不支持的操作: ${action}`);
+  // 复用 resolve.ts 的收窄函数，不再抄一份动作字面量：那边的表由
+  // satisfies Record<SupervisorAction, true> 钉住完备性，协议新增一个动作时会当场编译失败，
+  // 而抄在这里的字面量只会静默地不放行新动作。
+  if (!isSupervisorAction(action))
+    throw new Error($t("TXT_CODE_RUNNER_ACTION_UNSUPPORTED", { action }));
   // 助手会再校验一次（那次才是有效的边界）；这里挡住明显非法值，省一次 sudo 往返
-  if (!SERVICE_RE.test(service)) throw new Error(`非法的服务名: ${service}`);
+  if (!SERVICE_RE.test(service))
+    throw new Error($t("TXT_CODE_RUNNER_SERVICE_NAME_INVALID", { service }));
   // 与 deleteRunner 互斥：删除窗口里的 restart 会把刚被卸掉的单元重新拉起来，而目录随后就没了
   return withRunnerLock([serviceKey(service)], "service", () => runUnitAction(service, action));
 }
@@ -839,7 +853,8 @@ export async function controlService(
 // 反查不到必须抛一条说得清病因的错：回空串的话会一路落到 controlRunner 的「目录必须是绝对
 // 路径」，用户看到的错误与真实原因（这个单元不属于任何纳管目录）毫无关系。
 export function dirOfSystemdUnit(service: string): string {
-  if (!SERVICE_RE.test(service)) throw new Error(`非法的服务名: ${service}`);
+  if (!SERVICE_RE.test(service))
+    throw new Error($t("TXT_CODE_RUNNER_SERVICE_NAME_INVALID", { service }));
   for (const dir of managedRunnerDirs()) {
     try {
       if (readServiceName(dir) === service) return dir;

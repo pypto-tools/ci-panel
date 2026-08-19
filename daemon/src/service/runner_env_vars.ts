@@ -89,11 +89,14 @@ export function writeDotEnvFile(dir: string, desired: RunnerEnvVar[]): void {
 // 两个作用域共用它：job 作用域读 <dir>/.env，listener 作用域由各托管后端读自己的存储
 // （systemd 读 drop-in override.conf）。所以它放在这个叶子模块，不放在任何一边。
 export function readSection(file: string, parse: (t: string) => RunnerEnvVar[]): RunnerEnvSection {
+  // 直接读、把 ENOENT 归到「不存在」，不先 existsSync：那是一对 check-then-use，两次调用之间
+  // 文件被删掉的话会返回 present:true + error，于是 writeRunnerEnv 会为一个根本不存在的文件
+  // 中止一次非 replace 写入，并给出一句说不清病因的提示。少一次 stat 只是顺带的好处。
   try {
-    if (!fs.existsSync(file)) return { present: false, vars: [] };
     return { present: true, vars: parse(fs.readFileSync(file, "utf8")) };
-  } catch (err: any) {
-    const msg = err?.message || String(err);
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return { present: false, vars: [] };
+    const msg = err instanceof Error ? err.message : String(err);
     logger.warn(`[runner-env] 读 ${file} 失败: ${msg}`);
     return { present: true, vars: [], error: msg };
   }

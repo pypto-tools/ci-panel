@@ -27,6 +27,39 @@ describe("toRuntimeState", () => {
     expect(toRuntimeState("systemd", { instances: [] }, true).running).toBe(false);
   });
 
+  it("counts a conflicted directory as running", () => {
+    // conflict is the one ownership that *requires* live instances — two listeners in one
+    // directory, or two backends claiming the same one. Reporting it as offline while `state`
+    // says "running" told the panel two contradictory things about the same row, and the count
+    // of online runners silently dropped the case that most needs looking at.
+    const rt = toRuntimeState(
+      "systemd",
+      { instances: [inst({ id: "1" }), inst({ id: "2" })] },
+      true
+    );
+    expect(rt.ownership).toBe("conflict");
+    expect(rt.running).toBe(true);
+    expect(rt.state).toBe("running");
+  });
+
+  it("counts a single disputed instance as running too", () => {
+    // The other road to conflict: one process, claimed by two backends.
+    const rt = toRuntimeState(
+      "systemd",
+      { instances: [inst({ by: "systemd", disputed: true })] },
+      true
+    );
+    expect(rt.ownership).toBe("conflict");
+    expect(rt.running).toBe(true);
+  });
+
+  it("is not running when the observation failed and found nothing", () => {
+    // unknown must not be mistaken for online either — there is no live instance behind it.
+    const rt = toRuntimeState("systemd", { instances: [] }, false);
+    expect(rt.ownership).toBe("unknown");
+    expect(rt.running).toBe(false);
+  });
+
   it("takes busy as the union across instances", () => {
     // Any worker anywhere in this directory means stopping it interrupts CI.
     const rt = toRuntimeState(
@@ -61,6 +94,33 @@ describe("toRuntimeState", () => {
       const rt = toRuntimeState("systemd", { instances: [], detail: "unit entered failed" }, true);
       expect(rt.detail).toBe("unit entered failed");
     });
+  });
+
+  it("takes detail, since and raw from one and the same instance", () => {
+    // The row the panel renders describes a process, so its fields must describe the *same*
+    // process. Picking each field from whichever instance happened to have one produced a row
+    // pairing one listener's unit name with another's start time — worse than a blank field,
+    // because it reads as fact.
+    const rt = toRuntimeState(
+      "systemd",
+      {
+        instances: [
+          inst({ id: "1", state: "starting", since: "yesterday", raw: { pid: "1" } }),
+          inst({
+            id: "2",
+            state: "running",
+            since: "today",
+            raw: { pid: "2" },
+            detail: "the live one"
+          })
+        ]
+      },
+      true
+    );
+    expect(rt.state).toBe("running");
+    expect(rt.since).toBe("today");
+    expect(rt.raw).toEqual({ pid: "2" });
+    expect(rt.detail).toBe("the live one");
   });
 
   it("prefers an instance's own detail over the directory's", () => {

@@ -27,8 +27,8 @@ import {
   scanRunners,
   unregisterRunner
 } from "../service/runner_scan";
-import { controlRunner } from "../service/supervisor/resolve";
-import type { SupervisorAction } from "mcsmanager-common";
+import { controlRunner, isSupervisorAction } from "../service/supervisor/resolve";
+import { $t } from "../i18n";
 import { readRunnerDiag } from "../service/runner_logs";
 import { readRunnerEnv, writeRunnerEnv, type EnvTarget } from "../service/runner_env";
 
@@ -135,10 +135,19 @@ routerApp.on("runner/state", async (ctx, data) => {
 // 不是失败——由前端的状态轮询继续收敛。
 routerApp.on("runner/service_control", async (ctx, data) => {
   try {
-    const action = String(data?.action || "") as SupervisorAction;
+    // 收窄，不断言：`as SupervisorAction` 会让类型系统以为这个边界证明过了，而请求体里
+    // 那串字符从来没被证明过任何事（controlRunner 里还有一道，两道都要）。
+    const action = String(data?.action || "");
+    if (!isSupervisorAction(action))
+      throw new Error($t("TXT_CODE_RUNNER_ACTION_UNSUPPORTED", { action }));
     // dir 优先。只发得出 service 的是还没升级的 panel：反查出目录，让两条路最终汇到同一个
     // 入口，别在这里留一条绕过 marker 授权的旁路。
-    const dir = String(data?.dir || "") || dirOfSystemdUnit(String(data?.service || ""));
+    const dirRaw = String(data?.dir || "");
+    const service = String(data?.service || "");
+    // 两个都空要在这里挡掉：落到 dirOfSystemdUnit("") 会报「非法的服务名: 」，那句话和真实
+    // 病因（请求根本没说要操作哪个 runner）毫无关系。
+    if (!dirRaw && !service) throw new Error($t("TXT_CODE_RUNNER_TARGET_REQUIRED"));
+    const dir = dirRaw || dirOfSystemdUnit(service);
     protocol.msg(ctx, "runner/service_control", await controlRunner(dir, action));
   } catch (err: any) {
     protocol.error(ctx, "runner/service_control", { err: err?.message || String(err) });

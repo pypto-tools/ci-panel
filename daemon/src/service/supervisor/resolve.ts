@@ -83,6 +83,10 @@ export async function observeAll(dirs: string[]): Promise<ObserveResult> {
     logger.error(`[supervisor] /proc 扫描失败，本轮观测不完整: ${errText(err)}`);
   }
 
+  // 每个目录的声明只解析一次。declaredFor 走 readMarker，那是一次同步 readFileSync +
+  // realpathSync；放在后端循环里就是 N*B 次阻塞读，而这条路每 10 秒跑一轮。
+  const declared = new Map(keys.map((k) => [k, declaredFor(k)]));
+
   for (const backend of availableBackends()) {
     let seen: Map<string, Observation>;
     try {
@@ -110,7 +114,7 @@ export async function observeAll(dirs: string[]): Promise<ObserveResult> {
         else byId.set(inst.id, prev?.by ? prev : inst);
       }
       merged.set(dir, byId);
-      if (obs.detail && backend.kind === declaredFor(dir)) details.set(dir, obs.detail);
+      if (obs.detail && backend.kind === declared.get(dir)) details.set(dir, obs.detail);
     }
   }
 
@@ -128,12 +132,22 @@ export async function observeAll(dirs: string[]): Promise<ObserveResult> {
 // ---- 控制 ----
 
 // 动作集合的完备性由这张记录型表钉住：协议新增一个动作时数组照样编译得过、这里就会静默不放行，
-// 记录型会当场报错。
+// 记录型会当场报错。不导出——对外只给下面那个收窄函数，表本身多一个消费方就多一处会漂移的判断。
 const ALLOWED_ACTIONS = {
   start: true,
   stop: true,
   restart: true
 } satisfies Record<SupervisorAction, true>;
+
+/**
+ * 请求体里那串字符是不是一个合法动作。**边界收窄只此一处** —— 每个入口各写一份 `as
+ * SupervisorAction` 的话，类型系统会以为边界证明过了，而实际上一次都没有。
+ *
+ * hasOwnProperty 而不是 in：别让 "toString" 这类原型链上的键蒙混过关。
+ */
+export function isSupervisorAction(value: string): value is SupervisorAction {
+  return Object.prototype.hasOwnProperty.call(ALLOWED_ACTIONS, value);
+}
 
 /**
  * 面板下发的启停都从这里走。
@@ -145,15 +159,16 @@ export async function controlRunner(
   dirRaw: string,
   action: SupervisorAction
 ): Promise<ControlOutcome> {
+  // 路由已经收窄过一次，这里再判一次：controlRunner 是公开导出的唯一控制入口，别让它的安全性
+  // 取决于「所有调用方都记得先校验」。
+  if (!isSupervisorAction(action))
+    throw new Error($t("TXT_CODE_RUNNER_ACTION_UNSUPPORTED", { action }));
   // canonicalPath 而不是 normalize：等号另一侧是 /proc 里的物理路径，两侧必须同源，
   // 否则观测恒为空 → 归属恒为 idle → 下面那三道闸门全部静默失效。
-  // hasOwnProperty 而不是 in：action 来自请求体，别让 "toString" 这类原型链上的键蒙混过关
-  if (!Object.prototype.hasOwnProperty.call(ALLOWED_ACTIONS, action))
-    throw new Error(`不支持的操作: ${action}`);
   const raw = String(dirRaw || "");
-  if (!path.isAbsolute(raw)) throw new Error("目录必须是绝对路径");
+  if (!path.isAbsolute(raw)) throw new Error($t("TXT_CODE_RUNNER_DIR_NOT_ABSOLUTE"));
   const dir = canonicalPath(raw);
-  if (dir === "/") throw new Error("目录不能是 /");
+  if (dir === "/") throw new Error($t("TXT_CODE_RUNNER_DIR_IS_ROOT"));
 
   // readMarker 而非 hasMarker：空文件不算凭据（沿用 scanOneRunner 的判断）
   const marker = readMarker(dir);

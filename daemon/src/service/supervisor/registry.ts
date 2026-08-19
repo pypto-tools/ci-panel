@@ -57,10 +57,13 @@ export function nodeCapabilities(): SupervisorCapability[] {
   if (capabilities) return capabilities;
   const detected = REGISTRY.map((f) => ({ f, a: f.detect() }));
   const forced = process.env.CIP_RUNNER_SUPERVISOR;
+  // REGISTRY 已按 priority 降序，且 none 恒可用，所以兜底一定取得到 —— 但不去索引 [0]：
+  // 哪天 none 变成有条件可用，无守卫的写法会在首次能力探测（daemon 启动早期）抛一个
+  // 「Cannot read properties of undefined」，而真正的病因是注册表少了兜底项。
+  const fallback = detected.find((d) => d.a.available);
+  if (!fallback) throw new Error("[supervisor] 没有任何可用的托管后端：注册表缺少恒可用的 none");
   const chosen =
-    detected.find((d) => d.f.kind === forced && d.a.available)?.f.kind ??
-    // REGISTRY 已按 priority 降序，且 none 恒可用，所以这里一定取得到
-    detected.filter((d) => d.a.available)[0].f.kind;
+    detected.find((d) => d.f.kind === forced && d.a.available)?.f.kind ?? fallback.f.kind;
   if (forced && forced !== chosen)
     logger.warn(
       `[supervisor] CIP_RUNNER_SUPERVISOR=${forced} 在本节点不可用，退回自动探测的 ${chosen}`

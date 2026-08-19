@@ -49,21 +49,27 @@ export function toRuntimeState(
   complete: boolean
 ): RunnerRuntimeState {
   const ownership = ownershipOf(supervisor, obs.instances, complete);
+  const liveliest = STATE_RANK.find((r) => obs.instances.some((i) => i.state === r));
+  // 代表实例 = 定出 state 的那一个。detail / since / raw 三个字段都从它身上取，不各挑各的：
+  // 挑出来的一行会把 A 进程的单元名配上 B 进程的启动时间，排障时这种混装比缺字段更误导人。
+  const lead = obs.instances.find((i) => i.state === liveliest) ?? obs.instances[0];
   return {
     supervisor,
     ownership,
-    // 有活体就算在线，与谁在管无关：foreign 也是「它确实在跑」
-    running: ownership === "self" || ownership === "foreign",
+    // 有活体就算在线，与谁在管无关：foreign 是「它确实在跑」，conflict 更是 —— 它恰恰**要求**
+    // 有活体（见 ownershipOf）。按归属白名单写就会把 conflict 漏掉，面板于是把一个正在抢 job
+    // 的目录显示成离线。没有活体的只有 idle 与 unknown，所以直接数实例。
+    running: obs.instances.length > 0,
     state:
       obs.instances.length === 0
         ? complete
           ? "stopped" // 确实停着 —— 最常见的那一格
           : "unknown" // 答不出
-        : (STATE_RANK.find((r) => obs.instances.some((i) => i.state === r)) ?? "unknown"),
-    // 有实例就用实例的，没实例就用目录级的（那正是「起不来」的场景）
-    detail: obs.instances.find((i) => i.detail)?.detail || obs.detail || "",
-    since: obs.instances.find((i) => i.since)?.since || "",
+        : (liveliest ?? "unknown"),
+    // 有实例就用代表实例的，没实例就用目录级的（那正是「起不来」的场景）
+    detail: lead?.detail || obs.detail || "",
+    since: lead?.since || "",
     busy: obs.instances.some((i) => i.busy),
-    raw: obs.instances[0]?.raw
+    raw: lead?.raw
   };
 }

@@ -282,14 +282,24 @@ export async function stopBeforeUninstall(
 // 相等——不能靠 pid 比对。精确的证据是 cgroup：systemd 把单元的所有进程放进以单元名命名的
 // cgroup 里。比「单元 active 且目录里有 listener」严格得多，后者在「单元 active + 有人手动又
 // 跑了一个」时会把两个都认领成自己的，于是 conflict 退化成 self、start 被放行。
+//
+// 退化判定的告警按单元去重。读不到 cgroup 的原因是内核配置，不是偶发故障：不去重的话，每个
+// listener 每一轮观测都写一条，一天下来几万条同样的 WARN 会把日志里真正的事件淹掉。只在进程内
+// 记「这个单元已经说过了」——重启后再说一次是对的，那正是重新确认现状的时候。
+const cgroupFallbackWarned = new Set<string>();
+
 function unitOwns(unit: SystemdUnit | null, service: string, p: ListenerProc): boolean {
   if (!unit?.loaded) return false;
   if (p.cgroup) return p.cgroup.includes(`/${service}`);
   // cgroup 读不到（内核配置差异）时的退化判定：单元有主进程就认。记 WARN，因为这一支比上面
   // 那条宽——它认不出「单元在跑 + 另有人手动又起了一个」里的第二个。
-  logger.warn(
-    `[supervisor-systemd] 读不到 pid ${p.pid} 的 cgroup，${service} 的认领退回 MainPID 判定`
-  );
+  if (!cgroupFallbackWarned.has(service)) {
+    cgroupFallbackWarned.add(service);
+    logger.warn(
+      `[supervisor-systemd] 读不到 pid ${p.pid} 的 cgroup，${service} 的认领退回 MainPID 判定` +
+        `（本单元后续同类告警不再重复）`
+    );
+  }
   return unit.mainPid > 0;
 }
 
@@ -394,7 +404,8 @@ function createSystemdSupervisor(): RunnerSupervisor {
     // 动作这一侧因此是同一个判断，不会出现「锁按有单元占、动作按没单元走」的错位。
     prepare(dir: string): SupervisorTarget {
       const service = readServiceName(dir);
-      if (service && !SERVICE_RE.test(service)) throw new Error(`非法的服务名: ${service}`);
+      if (service && !SERVICE_RE.test(service))
+        throw new Error($t("TXT_CODE_RUNNER_SERVICE_NAME_INVALID", { service }));
       return { lockKeys: service ? [serviceKey(service)] : [], ctx: { service } };
     },
 
@@ -478,7 +489,8 @@ function createSystemdSupervisor(): RunnerSupervisor {
     async readListenerEnv(dir: string, t?: SupervisorTarget): Promise<RunnerEnvSection> {
       const service = unitOf(t) || readServiceName(dir);
       if (!service) return { present: false, vars: [] };
-      if (!SERVICE_RE.test(service)) throw new Error(`非法的服务名: ${service}`);
+      if (!SERVICE_RE.test(service))
+        throw new Error($t("TXT_CODE_RUNNER_SERVICE_NAME_INVALID", { service }));
       return readSection(overrideConfPath(service), parseOverrideConf);
     },
 

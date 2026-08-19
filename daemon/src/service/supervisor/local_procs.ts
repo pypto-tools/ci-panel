@@ -11,6 +11,7 @@
 import fs from "fs-extra";
 
 import { canonicalPath } from "../../tools/path_link_check";
+import logger from "../log";
 
 export interface ListenerProc {
   pid: number;
@@ -82,8 +83,18 @@ export async function scanListenerProcs(procRoot = "/proc"): Promise<ListenerPro
             dir: canonicalPath(m[1]),
             cgroup
           });
-        } catch {
-          /* 进程可能刚好退出了，跳过 */
+        } catch (err: unknown) {
+          // 进程刚好退出是这里的常态（几千个 pid，一轮扫下来必然撞上几个），静默跳过。
+          // 其余原因（hidepid 下的 EACCES、/proc 被 bind mount 掉）会让一个**活着的** listener
+          // 从这一轮里消失，而调用方拿不到任何区别 —— 那正是把 conflict 降级成 idle 的形状。
+          //
+          // 不改成抛：整轮观测跟着失败，意味着 hidepid=1 这一个内核设置就能让全节点的 runner
+          // 恒为 unknown、启停全部拒绝，代价远大于它挡住的风险。留一条 WARN，让排障时看得见。
+          const code = (err as NodeJS.ErrnoException)?.code;
+          if (code !== "ENOENT" && code !== "ESRCH")
+            logger.warn(
+              `[supervisor] 读 pid ${pid} 的 /proc 条目失败（该进程本轮被跳过）: ${code || err}`
+            );
         }
       })
     );

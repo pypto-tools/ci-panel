@@ -25,13 +25,24 @@ export { arrayUnique } from "./array";
 
 // runner 纳管协议（纯类型，前端用 import type 引，不会带进浏览器 bundle）
 export type {
+  ControlOutcome,
+  EnvTarget,
   RegisterRunnerItem,
   RegisterRunnerResult,
   RegisterRunnersResponse,
+  RunnerEnvResult,
+  RunnerEnvSection,
+  RunnerEnvVar,
+  RunnerOwnership,
+  RunnerRunState,
+  RunnerRuntimeState,
   RunnerSource,
+  ScannedRunner,
   ServiceControlResult,
+  SupervisorAction,
+  SupervisorKind,
   SystemdAction,
-  SystemdState
+  SystemdStateCompat
 } from "./runner_protocol";
 
 // 同一份协议里唯一的运行时导出，供 panel 转发 daemon 回复时用。前端不引它（只 import type），

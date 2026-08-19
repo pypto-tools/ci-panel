@@ -13,18 +13,29 @@ import { readRunnerEnv } from "../../src/service/runner_env";
 // root; the two TypeScript copies only decide what the daemon bothers to ask for. They must not
 // drift apart, and nothing in the build would notice if they did.
 
-const SOURCES = [
-  { label: "runner_scan.ts", file: path.join(DAEMON_ROOT, "src/service/runner_scan.ts") },
-  { label: "runner_env.ts", file: path.join(DAEMON_ROOT, "src/service/runner_env.ts") }
-];
 const HELPER = path.join(REPO_ROOT, "prod-scripts/ci-panel-runner-svc");
 
+// Found by walking the tree, not by a hardcoded list of files. The list was two paths and both
+// have since moved: the supervisor framework added a third copy in the systemd backend, and more
+// of this is still in motion. A stale path here does not fail loudly at the assertion — extractTs
+// throws during collection, and every case in this file disappears from the run. Walking is
+// immune to the next move and also catches a fourth copy nobody mentioned.
+const TS_LITERAL = /^(?:export )?const SERVICE_RE = \/(.+)\/;$/m;
+
+const walk = (dir: string): string[] =>
+  fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) return walk(full);
+    return e.isFile() && e.name.endsWith(".ts") ? [full] : [];
+  });
+
+const SOURCES = walk(path.join(DAEMON_ROOT, "src"))
+  .map((file) => ({ file, literal: fs.readFileSync(file, "utf8").match(TS_LITERAL)?.[1] }))
+  .filter((s): s is { file: string; literal: string } => Boolean(s.literal))
+  .map((s) => ({ label: path.relative(DAEMON_ROOT, s.file), file: s.file, literal: s.literal }));
+
 const extractTs = (file: string): string => {
-  // Tolerate an `export` prefix: the most likely future refactor is exporting SERVICE_RE from
-  // runner_scan.ts to remove exactly the duplication this spec polices, and that must not make
-  // the extraction throw. If it ever does fail, it fails loudly — every case in this file
-  // disappears and the run exits non-zero, rather than passing vacuously.
-  const m = fs.readFileSync(file, "utf8").match(/^(?:export )?const SERVICE_RE = \/(.+)\/;$/m);
+  const m = fs.readFileSync(file, "utf8").match(TS_LITERAL);
   if (!m) throw new Error(`no SERVICE_RE literal found in ${file}`);
   return m[1];
 };
@@ -35,10 +46,22 @@ const extractBash = (file: string): string => {
   return m[1];
 };
 
-describe("all three declarations agree", () => {
-  it("the two TypeScript copies are byte-identical", () => {
-    const [scan, env] = SOURCES.map((s) => extractTs(s.file));
-    expect(scan).toBe(env);
+describe("every declaration agrees", () => {
+  it("finds the TypeScript copies at all", () => {
+    // Zero would make the next case pass vacuously; the count is deliberately a floor rather than
+    // an exact number, since a new copy is not itself a defect — a diverging one is.
+    expect(
+      SOURCES.length,
+      "no SERVICE_RE literal anywhere under daemon/src"
+    ).toBeGreaterThanOrEqual(3);
+  });
+
+  it("the TypeScript copies are byte-identical", () => {
+    const distinct = new Set(SOURCES.map((s) => s.literal));
+    expect(
+      Array.from(distinct),
+      `copies disagree: ${SOURCES.map((s) => `${s.label}=${s.literal}`).join(" | ")}`
+    ).toHaveLength(1);
   });
 
   it("the privileged helper's copy matches the daemon's", () => {

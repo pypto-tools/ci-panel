@@ -1358,5 +1358,22 @@
   "TXT_CODE_RUNNER_BATCH_RETRY_TOKEN_PLACEHOLDER": "重新填注册 token 后重试失败项",
   "TXT_CODE_RUNNER_SCAN_COLLECT_TIP": "扫描基目录，把已注册(有 .runner)但面板还没建实例的 runner 纳入看护",
   "TXT_CODE_PROXY_UNSAFE_TARGET": "不允许的代理目标：仅允许公网 http/https 域名",
-  "TXT_CODE_PROXY_REQUEST_FAILED": "代理请求失败，详情见面板日志"
+  "TXT_CODE_PROXY_REQUEST_FAILED": "代理请求失败，详情见面板日志",
+  "TXT_CODE_RUNNER_NOT_MANAGED": "该 runner 未被面板纳管，请先导入。",
+  "TXT_CODE_RUNNER_ALREADY_RUNNING": "该 runner 已经在运行。",
+  "TXT_CODE_RUNNER_ALREADY_SUPERVISED": "该目录里已有一个不受面板托管的 runner 进程在跑，拒绝再起第二个。",
+  "TXT_CODE_RUNNER_FOREIGN_REFUSE": "该 runner 不是面板拉起的，面板不会去停它。",
+  "TXT_CODE_RUNNER_CONFLICT_REFUSE": "该 runner 同时被不止一个托管方管着，请先处理冲突。",
+  "TXT_CODE_RUNNER_OBSERVE_INCOMPLETE": "本节点这一轮没能查清该目录里在跑什么，查清之前拒绝启动。",
+  "TXT_CODE_RUNNER_FOREIGN_RUNNING": "{{dir}} 里仍有 runner 进程在跑，面板不知道怎么安全地停它，请先在节点上停掉。",
+  "TXT_CODE_RUNNER_SUPERVISOR_NONE": "本节点不托管 runner 进程，启停不可用。",
+  "TXT_CODE_RUNNER_LISTENER_ENV_UNAVAILABLE": "本节点无法设置监听进程的环境变量。",
+  "TXT_CODE_RUNNER_SUPERVISOR_UNKNOWN": "未知的 runner 托管方式：{{kind}}。",
+  "TXT_CODE_RUNNER_ACTION_UNSUPPORTED": "不支持的 runner 操作：{{action}}。",
+  "TXT_CODE_RUNNER_TARGET_REQUIRED": "必须给出 runner 目录或服务名。",
+  "TXT_CODE_RUNNER_DIR_NOT_ABSOLUTE": "runner 目录必须是绝对路径。",
+  "TXT_CODE_RUNNER_DIR_IS_ROOT": "runner 目录不能是 /。",
+  "TXT_CODE_RUNNER_SERVICE_NAME_INVALID": "非法的服务名：{{service}}。",
+  "TXT_CODE_RUNNER_DETACH_HINT_SYSTEMD": "请在节点上用特权助手停止并卸载该 runner 的 systemd 单元后重试。",
+  "TXT_CODE_RUNNER_DETACH_HINT_NONE": "请到起它的地方把该 runner 进程停掉后重试。"
 }

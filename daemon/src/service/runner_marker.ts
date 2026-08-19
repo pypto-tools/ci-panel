@@ -19,8 +19,12 @@ export const MARKER_FILE = ".cipanel";
 // v2：新增 labels 字段。v1 老 marker 无 labels，读出为 ""（标签未知），安全降级。
 const MARKER_VERSION = 2;
 
-// source 刻意只记「来源」（创建还是导入）这个不变量，不记 systemd/panel/both 这种
-// 会漂移的实时托管方式——后者每次探测现算，存进静态文件只会过期误导。
+// source 刻意只记「来源」（创建还是导入）这个不变量，不记「现在实际被谁管着」这种会漂移的
+// 观测结果——后者每次探测现算，存进静态文件只会过期误导。
+//
+// 后来新增的 supervisor 字段不与这条冲突：它记的是**意图**（置备时定下「该由谁管」），
+// 与观测正交，而且必须落盘——若每次从节点能力现推，特权助手哪天坏掉就会让一个 systemd 在管的
+// runner 翻成别的后端，daemon 于是在活着的单元旁边再拉起一个 listener。
 //
 // 定义在 common/src/runner_protocol.ts，三方共用。这里只转出去，免得已有的
 // `from "./runner_marker"` 全要改路径——之前这里是第二份手写声明，两边各自演化。
@@ -34,6 +38,13 @@ export interface RunnerMarker {
   labels: string; // 注册时的原始 labels（逗号分隔，原样保留）；v1 老 marker / import 无此值时为 ""
   source: RunnerSource;
   managedSince: number; // 纳管时间（ms 时间戳）
+  // 置备时定下的托管意图（systemd / none / …）。v1、v2 老 marker 没有这个字段，读出为
+  // undefined，由 supervisor/resolve.ts 按「装过单元的算 systemd，其余交给节点默认」推断。
+  //
+  // 刻意声明成 string 而不是 SupervisorKind：它是磁盘上的原始值，合法性由 resolveSupervisor
+  // 那边的 isSupervisorKind 判一次（注册表在那边）。本文件是最底层、不引任何其他 service，
+  // 把它拉进后端的依赖环不值得。
+  supervisor?: string;
 }
 
 export function markerPath(dir: string) {
@@ -83,7 +94,9 @@ export function readMarker(dir: string): RunnerMarker | null {
       repo: String(j.repo || ""),
       labels: String(j.labels || ""),
       source: j.source === "import" ? "import" : "provision",
-      managedSince: Number(j.managedSince) || 0
+      managedSince: Number(j.managedSince) || 0,
+      // 不是字符串就当没写过：取值本身是否为已注册的后端，由 resolveSupervisor 再判一次
+      supervisor: typeof j.supervisor === "string" && j.supervisor ? j.supervisor : undefined
     };
   } catch {
     return null;

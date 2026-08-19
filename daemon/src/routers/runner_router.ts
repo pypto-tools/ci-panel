@@ -17,17 +17,18 @@ import {
   startRunnerDownload
 } from "../service/runner_provision";
 import {
-  controlService,
   deleteRunner,
+  dirOfSystemdUnit,
   listDirs,
   makeDir,
   registerRunners,
   scanManagedRunners,
   scanOneRunner,
   scanRunners,
-  unregisterRunner,
-  type SystemdAction
+  unregisterRunner
 } from "../service/runner_scan";
+import { controlRunner, isSupervisorAction } from "../service/supervisor/resolve";
+import { $t } from "../i18n";
 import { readRunnerDiag } from "../service/runner_logs";
 import { readRunnerEnv, writeRunnerEnv, type EnvTarget } from "../service/runner_env";
 
@@ -128,14 +129,26 @@ routerApp.on("runner/state", async (ctx, data) => {
   }
 });
 
-// 启停 systemd 托管的 runner。需要 sudoers 免密白名单。
-// 返回值带 settled：false 表示 systemd 已受理但还没跑到位（停不掉的单元很常见），
+// 启停一个 runner。按**目录**寻址：单元名只有 systemd 后端才有，而托管方式不止一种。
+// 授权依据是目录里的 .cipanel 纳管凭据（此前是「这串字符长得像单元名」）。
+// 返回值带 settled：false 表示托管方已受理但还没跑到位（停不掉的单元很常见），
 // 不是失败——由前端的状态轮询继续收敛。
 routerApp.on("runner/service_control", async (ctx, data) => {
   try {
+    // 收窄，不断言：`as SupervisorAction` 会让类型系统以为这个边界证明过了，而请求体里
+    // 那串字符从来没被证明过任何事（controlRunner 里还有一道，两道都要）。
+    const action = String(data?.action || "");
+    if (!isSupervisorAction(action))
+      throw new Error($t("TXT_CODE_RUNNER_ACTION_UNSUPPORTED", { action }));
+    // dir 优先。只发得出 service 的是还没升级的 panel：反查出目录，让两条路最终汇到同一个
+    // 入口，别在这里留一条绕过 marker 授权的旁路。
+    const dirRaw = String(data?.dir || "");
     const service = String(data?.service || "");
-    const action = String(data?.action || "") as SystemdAction;
-    protocol.msg(ctx, "runner/service_control", await controlService(service, action));
+    // 两个都空要在这里挡掉：落到 dirOfSystemdUnit("") 会报「非法的服务名: 」，那句话和真实
+    // 病因（请求根本没说要操作哪个 runner）毫无关系。
+    if (!dirRaw && !service) throw new Error($t("TXT_CODE_RUNNER_TARGET_REQUIRED"));
+    const dir = dirRaw || dirOfSystemdUnit(service);
+    protocol.msg(ctx, "runner/service_control", await controlRunner(dir, action));
   } catch (err: any) {
     protocol.error(ctx, "runner/service_control", { err: err?.message || String(err) });
   }

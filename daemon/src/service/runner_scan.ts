@@ -37,17 +37,21 @@ import {
   uninstallSystemdService
 } from "./runner_provision";
 import { dirKey, serviceKey, withRunnerLock } from "./runner_lock";
+import { $t } from "../i18n";
+import { canonicalPath } from "../tools/path_link_check";
+import { legacyManagedBy, legacySystemdState } from "./supervisor/legacy";
+import { scanListenerProcs } from "./supervisor/local_procs";
+import { toRuntimeState } from "./supervisor/ownership";
+import { isSupervisorAction, observeAll, resolveSupervisor } from "./supervisor/resolve";
+import { runUnitAction, stopBeforeUninstall } from "./supervisor/systemd";
 import type {
   RegisterRunnerItem,
   RegisterRunnerResult,
-  ServiceControlResult,
-  SystemdAction,
-  SystemdState
+  ScannedRunner,
+  SupervisorAction
 } from "mcsmanager-common";
 // 三方共用的声明只在 common 里写一份；这里转出去，免得已有的 import 全要改路径
-export type { ServiceControlResult, SystemdAction, SystemdState };
-
-const SYSTEMCTL = "/usr/bin/systemctl";
+export type { ScannedRunner };
 
 // 单元名的唯一合法形状。与助手脚本的 SERVICE_RE 保持一致。
 const SERVICE_RE = /^actions\.runner\.[A-Za-z0-9._@-]+\.service$/;
@@ -107,29 +111,6 @@ export function initRunnerRoots(): void {
 // 布局是 <root>/<仓库目录>/<runner 目录>，两层足够；再深就是 runner 自己的 bin/_work 了
 const MAX_DEPTH = 2;
 
-export interface ScannedRunner {
-  dir: string;
-  dirName: string;
-  repo: string; // owner/repo，来自 .runner 的 gitHubUrl
-  agentName: string; // runner 在 GitHub 上的名字，来自 .runner
-  systemd: SystemdState | null; // null = 没装 systemd 服务
-  instanceUuid: string; // 面板实例（按 cwd 匹配），空 = 面板没托管
-  instanceStatus: number; // 面板实例状态，-1 = 无实例
-  // systemd  : 由 systemd 托管（生产常态）
-  // panel    : 由面板实例托管
-  // both     : 两边都托管——危险，同一个 runner 目录可能跑起两个 Runner.Listener
-  // none     : 已注册但没人托管，永远接不到任务
-  managedBy: "systemd" | "panel" | "both" | "none";
-  busy: boolean; // 正在跑 job（有 Runner.Worker 子进程）——停它会中断 CI 任务
-  // 面板纳管标记（.cipanel）。managed=true 才算面板在纳管，日常展示只看这类。
-  managed: boolean;
-  markerId: string; // marker 里的管理标识，空 = 未纳管
-  source: RunnerSource | ""; // provision / import，空 = 未纳管
-  group: string; // marker 里的所属组
-  exists: boolean; // 目录是否还在且含 .runner（按已知路径探测时用得上）
-  broken?: string; // 目录有问题时的说明（.runner 解析失败等）
-}
-
 export interface ScanResult {
   roots: string[];
   runners: ScannedRunner[];
@@ -158,7 +139,12 @@ export function readServiceName(dir: string): string {
 }
 
 // 收集所有含 .runner 的目录；命中即停，不再往里挖
-function collectRunnerDirs(dir: string, depth: number, out: string[], errors: ScanResult["errors"]) {
+function collectRunnerDirs(
+  dir: string,
+  depth: number,
+  out: string[],
+  errors: ScanResult["errors"]
+) {
   if (depth > MAX_DEPTH) return;
   // 每一层都要复核，不能只在根上校验一次：下面的 statSync/readdirSync 与 isRunnerDir 都跟随
   // 符号链接，所以扫描根里的一个 <root>/仓库/x → /根外目录 就足以让这次扫描去回读根外的
@@ -194,99 +180,26 @@ function collectRunnerDirs(dir: string, depth: number, out: string[], errors: Sc
   }
 }
 
-// 一次 systemctl show 查完所有单元，省得 30 个 runner 调 30 次。异步执行，不阻塞事件循环。
-async function querySystemd(services: string[]): Promise<Map<string, SystemdState>> {
-  const result = new Map<string, SystemdState>();
-  // 单元名来自各 runner 目录下的 .service，而那个文件 runner 属主自己就能改写。不校验就直接
-  // 展开进 argv 的话，一份写着 `--property=…` 的 .service 就能改掉这次查询——下面那个
-  // --property 排在它们后面，而 systemctl 的选项不认位置。execFile 是数组传参、不起 shell，
-  // 所以够不成命令注入，但该拦的还是要拦：形状不合法的一律不查（照旧回 null 状态）。
-  const wanted = services.filter((s) => SERVICE_RE.test(s));
-  // 丢掉的要说出来。本文件对 .service 的一贯态度是「查不到状态必须让人知道」（见 buildRunners
-  // 里的 broken），静默过滤会让一个 .service 写坏的 runner 悄悄显示成「没装服务」。
-  if (wanted.length !== services.length)
-    logger.warn(
-      `[runner-scan] 忽略 ${services.length - wanted.length} 个形状非法的单元名，` +
-        `对应 runner 的 systemd 状态将显示为未知`
-    );
-  if (wanted.length === 0) return result;
-  let out = "";
-  try {
-    const r = await execFileAsync(
-      SYSTEMCTL,
-      [
-        "show",
-        ...wanted,
-        "--property=Id,LoadState,ActiveState,SubState,UnitFileState,ExecMainStartTimestamp"
-      ],
-      { encoding: "utf8", timeout: 15000, maxBuffer: 8 * 1024 * 1024 }
-    );
-    out = String(r.stdout);
-  } catch (err: any) {
-    logger.error(`[runner-scan] systemctl show 失败: ${err.message}`);
-    return result;
-  }
-  // 多个单元的输出以空行分隔
-  for (const block of out.split(/\n\s*\n/)) {
-    const kv: Record<string, string> = {};
-    for (const line of block.split("\n")) {
-      const i = line.indexOf("=");
-      if (i > 0) kv[line.slice(0, i)] = line.slice(i + 1);
-    }
-    if (!kv.Id) continue;
-    result.set(kv.Id, {
-      service: kv.Id,
-      loaded: kv.LoadState === "loaded",
-      activeState: kv.ActiveState || "",
-      subState: kv.SubState || "",
-      enabled: kv.UnitFileState || "",
-      since: kv.ExecMainStartTimestamp || ""
-    });
-  }
-  return result;
-}
-
 // 找出正在跑 job 的 runner 目录。
 // runner 空闲时只有 Runner.Listener 一个进程；接到 job 后会 fork 出 Runner.Worker 子进程。
 // 停一个 busy 的 runner 会当场中断 CI 任务，所以必须在 UI 上标出来、拦一道。
-// 关联方式：Worker 的父进程就是 Listener，而 Listener 的 cmdline 里带着 runner 目录的绝对路径。
-// 异步 + 分批并发读 /proc：机器上可能有几千个进程，同步逐个读会卡住事件循环几十毫秒、
-// 负载高时更久。分批(每批 256)既不阻塞、也不会一次打开几千个 fd。
+//
+// 现在从 supervisor/local_procs 的那一份 /proc 扫描派生 —— 同一个「哪些目录里有活 listener」
+// 的问题在托管框架里也要回答，两份实现只会漂移。签名与调用方（删除前的 busy 拦截）都不变。
+//
+// **这道删除闸门因此仍然硬钉在本机 /proc 上**，与后端 observe 报的 busy 无关：对任何看不见
+// Runner.Worker 的托管方式（容器、远端），它会静默退化成「永不 busy」。本方案落地的后端都从
+// 同一份扫描派生，两者恒等；第一个打破这个等式的后端必须同时把这道闸改成读 runtime.busy。
 async function busyRunnerDirs(): Promise<Set<string>> {
-  const busy = new Set<string>();
-  let pids: string[] = [];
   try {
-    pids = (await fs.promises.readdir("/proc")).filter((n) => /^\d+$/.test(n));
-  } catch {
-    return busy;
+    const procs = await scanListenerProcs();
+    return new Set(procs.filter((p) => p.busy).map((p) => p.dir));
+  } catch (err: unknown) {
+    // 扫不动 /proc 时回空集合：这里的语义是「拦不拦这次删除」，而删除本身另有 fail closed
+    // （detach 会复核活体）。观测路径要的是相反的语义，那条路走 observeAll，它会判 unknown。
+    logger.warn(`[runner-scan] /proc 扫描失败，busy 判定按「无」处理: ${errText(err)}`);
+    return new Set();
   }
-  const CHUNK = 256;
-  for (let i = 0; i < pids.length; i += CHUNK) {
-    await Promise.all(
-      pids.slice(i, i + CHUNK).map(async (pid) => {
-        try {
-          const comm = await fs.promises.readFile(`/proc/${pid}/comm`, "utf8");
-          if (comm.trim() !== "Runner.Worker") return;
-          // /proc/<pid>/stat 的 comm 字段可能含空格和括号，从最后一个 ')' 之后再切字段
-          const stat = await fs.promises.readFile(`/proc/${pid}/stat`, "utf8");
-          const fields = stat
-            .slice(stat.lastIndexOf(")") + 1)
-            .trim()
-            .split(/\s+/);
-          const ppid = fields[1];
-          const cmdline = (await fs.promises.readFile(`/proc/${ppid}/cmdline`, "utf8")).replace(
-            /\0/g,
-            " "
-          );
-          const m = cmdline.match(/^(\S+)\/bin\/Runner\.Listener/);
-          if (m) busy.add(path.normalize(m[1]));
-        } catch {
-          /* 进程可能刚好退出了，跳过 */
-        }
-      })
-    );
-  }
-  return busy;
 }
 
 // 从仓库地址提取 owner/repo。与 runner_provision.ts 的 repoSlug 同语义
@@ -337,20 +250,27 @@ function collectFromRoots(roots?: string[]): {
 
 // 从一组已知的 runner 目录构建结果：读 .runner / .service / .cipanel，统一查 systemd 与 busy。
 // scanRunners（全盘发现）与 scanManagedRunners（只看已纳管）都复用它，区别只在传进来的 dirs。
-async function buildRunners(dirs: string[]): Promise<ScannedRunner[]> {
+async function buildRunners(dirsRaw: string[]): Promise<ScannedRunner[]> {
   // 面板实例按工作目录索引，用来判断这个 runner 面板有没有在托管
   const instanceByCwd = new Map<string, { uuid: string; status: number }>();
   for (const inst of InstanceSubsystem.instances.values()) {
     const cwd = inst?.config?.cwd;
     if (cwd) {
-      instanceByCwd.set(path.normalize(cwd), {
+      // key 也走 canonicalPath：句柄实例的 cwd 与扫描来的目录必须算出同一个字符串，
+      // 否则软链路径下 instanceUuid 会空掉，文件管理与详情页的授权跟着断
+      instanceByCwd.set(canonicalPath(cwd), {
         uuid: inst.instanceUuid,
         status: inst.status()
       });
     }
   }
 
-  // 先把每个目录的 .runner / .service / .cipanel 读出来，再统一查 systemd
+  // canonicalPath 而不是 normalize：这批 dir 要拿去和 /proc 里的物理路径做字符串全等比较，
+  // 两侧必须走同一个归一化函数，否则软链节点上观测恒为空、归属恒判 idle，闸门静默失效。
+  // 这是 10 秒一轮的轮询热路径，所以算一次就存进 draft，别对同一个目录算两遍。
+  const dirs = dirsRaw.map(canonicalPath);
+
+  // 先把每个目录的 .runner / .service / .cipanel 读出来，再统一观测
   const drafts = dirs.map((dir) => {
     const marker = readMarker(dir);
     const draft = {
@@ -386,32 +306,30 @@ async function buildRunners(dirs: string[]): Promise<ScannedRunner[]> {
     return draft;
   });
 
-  // 两个外部调用并发跑，各自不阻塞事件循环
-  const [systemdStates, busy] = await Promise.all([
-    querySystemd(drafts.map((d) => d.service).filter(Boolean)),
-    busyRunnerDirs()
-  ]);
+  // 「谁在托管它、有没有在跑」全部退到托管后端里：这里对所有可用后端求一次并集，
+  // 本函数不再认识 systemctl 与 /proc。observeAll 内部一轮只扫一次 /proc。
+  const { byDir, complete } = await observeAll(dirs);
 
   const runners: ScannedRunner[] = drafts.map((d) => {
-    const systemd = d.service ? systemdStates.get(d.service) || null : null;
-    const instance = instanceByCwd.get(path.normalize(d.dir));
-
-    // 托管方式只认 systemd：provision 和导入的 runner 现在都由 systemd 托管，面板实例一律只是
-    // 文件管理/配置的「句柄」、不跑 run.sh，故不算托管。managedBy 因此只剩 systemd / none。
-    // （panel / both 两种历史状态在"纯 systemd 托管"下不再产生，前端保留其展示分支但不会触发。）
-    const bySystemd = Boolean(systemd?.loaded);
-    const managedBy: ScannedRunner["managedBy"] = bySystemd ? "systemd" : "none";
+    // 意图（该由谁管）与观测（现在被谁管着）是两个正交的轴，都由框架给出，这里只是组装
+    const supervisor = resolveSupervisor(d.dir, d.marker);
+    const runtime = toRuntimeState(supervisor, byDir.get(d.dir) ?? { instances: [] }, complete);
+    const instance = instanceByCwd.get(d.dir);
 
     return {
       dir: d.dir,
       dirName: d.dirName,
       repo: d.repo,
       agentName: d.agentName,
-      systemd,
+      supervisor,
+      runtime, // ownership / running / state / busy / raw
+      // ---- 兼容回填：给还没升级的 panel 读（见 supervisor/legacy.ts），1.2 一起删 ----
+      systemd: legacySystemdState(runtime),
+      managedBy: legacyManagedBy(runtime),
+      // ------------------------------------------------------------------------
+      // 句柄实例只作文件管理/详情页的抓手（那些接口按 uuid 授权），不参与任何托管判断
       instanceUuid: instance?.uuid || "",
       instanceStatus: instance ? instance.status : -1,
-      managedBy,
-      busy: busy.has(path.normalize(d.dir)),
       managed: Boolean(d.marker),
       markerId: d.marker?.id || "",
       source: d.marker?.source || "",
@@ -461,7 +379,7 @@ function managedRunnerDirs(): string[] {
   for (const inst of InstanceSubsystem.instances.values()) {
     const cwd = inst?.config?.cwd;
     if (!cwd) continue;
-    const norm = path.normalize(cwd);
+    const norm = canonicalPath(cwd);
     if (seen.has(norm)) continue;
     seen.add(norm);
     if (hasMarker(norm)) dirs.push(norm);
@@ -479,8 +397,9 @@ export async function scanManagedRunners(): Promise<ScanResult> {
 
 // 已纳管 runner 的运行计数，供 info/overview 上报「实例状态」。
 //
-// systemd 是唯一启动路径，句柄实例从不启动，所以按「面板启动了几个实例」统计恒为 0、毫无意义；
-// 这里改成按 systemd 的真实状态统计，节点页看到的才是 runner 的实际运行情况。
+// 句柄实例从不启动，所以按「面板启动了几个实例」统计恒为 0、毫无意义；这里按观测出来的真实
+// 运行态统计，节点页看到的才是 runner 的实际运行情况。「在线」全项目只有 runtime.running 一处
+// 定义，不在这里重新解析一遍 activeState。
 //
 // info/overview 会被面板高频轮询，故加 TTL 缓存，避免每次都走目录遍历 + systemctl。
 // 刻意不做 reconcile（不像 scanManagedRunners 那样补建句柄实例）——这是只读的热路径，不该有副作用。
@@ -501,8 +420,8 @@ export async function getManagedRunnerCounts(): Promise<ManagedRunnerCounts> {
   const value: ManagedRunnerCounts = { total: 0, running: 0, busy: 0 };
   for (const r of runners) {
     value.total++;
-    if (r.systemd?.loaded && r.systemd.activeState === "active") value.running++;
-    if (r.busy) value.busy++;
+    if (r.runtime?.running) value.running++;
+    if (r.runtime?.busy) value.busy++;
   }
   countsCache = { at: now, value };
   return value;
@@ -730,9 +649,19 @@ export async function deleteRunner(
   dirRaw: string,
   opts: DeleteRunnerOptions = {}
 ): Promise<DeleteResult> {
-  const dir = path.normalize(String(dirRaw || ""));
-  // 严格校验：绝对路径、非根、必须在扫描根下、且看起来确实是 runner 目录——绝不误删别处
-  if (!path.isAbsolute(dir) || dir === "/") throw new Error("目录必须是绝对路径且不能是 /");
+  // 严格校验：绝对路径、非根、必须在扫描根下、且看起来确实是 runner 目录——绝不误删别处。
+  //
+  // canonicalPath 而不是 normalize：这个值往下要当锁的 key（dirKey）、要和实例的 cwd 比、
+  // 要和 busyRunnerDirs 的键比，而那三处都已经归一化过了。只 normalize 的话，一个符号链接
+  // 别名就能占到与 controlRunner 不同的 dirKey（删除与启停的互斥静默失效）、绕开 busy 拦截、
+  // 并把句柄实例留在面板里指着一个已经删掉的目录。
+  //
+  // 绝对性判在**原串**上、归一化之前：canonicalPath 内含 path.resolve，空串会被补成 daemon
+  // 的 cwd 并一路通过这道检查（顺序沿用 controlRunner）。
+  const raw = String(dirRaw || "");
+  if (!path.isAbsolute(raw)) throw new Error("目录必须是绝对路径且不能是 /");
+  const dir = canonicalPath(raw);
+  if (dir === "/") throw new Error("目录必须是绝对路径且不能是 /");
   // 走共享的 assertUnderRoots，别再从环境变量重推一份：扫描根的真相源是助手的 ALLOWED_ROOT，
   // 各自推各自的会让这条删除路径和其余路径的边界不一致。
   try {
@@ -763,43 +692,6 @@ export async function deleteRunner(
   // 之间被换掉的话，我们会去停一个「没锁住的」单元，而锁住的那个还活着，紧接着目录就被删了。
   // 这里读到的这一份既是锁的依据，也必须是后续动作的依据。
   return withRunnerLock(keys, "delete", () => runDelete(dir, opts, lockedService));
-}
-
-// 卸载之前先把服务停稳，并且是由我们自己来等。
-//
-// 助手的 uninstall 用的是阻塞的 `disable --now`，而 runner 单元 TimeoutStopSec=5min：碰上不
-// 响应 SIGTERM 的 Runner.Listener，那条命令能坐满 5 分钟，而我们只给 HELPER_TIMEOUT_MS——超时
-// 是必然的，且 execFile 超时杀出来的错误 stderr 为空，和「免密没配」长得一模一样。改成走
-// runServiceAction（助手侧是 --no-block，这边自己轮询）之后，「等多久」由 DELETE_SETTLE_MS 说
-// 了算，等不到拿到的是明确的 settled:false。
-//
-// 必须是 runServiceAction 而不是 controlService：调用方已经持有这个单元的 svc: 锁，而
-// controlService 会再去占同一把——withRunnerLock 不可重入且快速失败，调它等于自己把自己挡死。
-// service 由 deleteRunner 传入 —— 就是它加锁时读到并校验过的那一份，本函数不再自己读 .service。
-async function stopBeforeUninstall(service: string): Promise<{ ok: boolean; error?: string }> {
-  // 空串 = 没装服务，或 .service 内容不合法（deleteRunner 因此没占那把锁）。两种都不发 stop：
-  // 后者留给助手去拒——它同样从 .service 派生单元名，会当场 die，删除随之中止，是 fail closed。
-  if (!service) return { ok: true };
-
-  // 查不到状态就不发 stop：对不存在的单元 `systemctl stop` 会非零退出，而删除一个没装服务的
-  // runner 是完全正常的操作，不该因此失败。这种情况留给幂等的 uninstall 收尾。
-  const before = (await querySystemd([service])).get(service) || null;
-  if (!before || !before.loaded) return { ok: true };
-  if (before.activeState === "inactive" || before.activeState === "failed") return { ok: true };
-
-  try {
-    const r = await runServiceAction(service, "stop", DELETE_SETTLE_MS);
-    if (r.settled) return { ok: true };
-    return {
-      ok: false,
-      error:
-        `服务未能在 ${Math.round(DELETE_SETTLE_MS / 1000)} 秒内停止` +
-        `（当前 ${r.status?.activeState || "状态未知"}）。停止请求已提交给 systemd，可能仍在进行——` +
-        `用 systemctl status ${service} 确认已停止后再重试删除。`
-    };
-  } catch (err: unknown) {
-    return { ok: false, error: errText(err) };
-  }
 }
 
 // 删除本体。进来时已在锁内、目录也已校验过。
@@ -853,7 +745,9 @@ async function runDelete(
         hint: `先手动停：sudo /usr/local/sbin/ci-panel-runner-svc uninstall ${dir}；确认 systemctl status 已停止后再重试删除`
       });
     const warnings = steps.filter((s) => s.status !== "ok").map((s) => `${s.label}：${s.detail}`);
-    logger.warn(`[runner-delete] ${dir} 中止：systemd 未能停止（${uninstall.error || "未知原因"}）`);
+    logger.warn(
+      `[runner-delete] ${dir} 中止：systemd 未能停止（${uninstall.error || "未知原因"}）`
+    );
     return { dir, ok: false, steps, warnings };
   }
 
@@ -885,7 +779,8 @@ async function runDelete(
   let instanceRemoved = false;
   try {
     for (const inst of InstanceSubsystem.instances.values()) {
-      if (inst?.config?.cwd && path.normalize(inst.config.cwd) === dir) {
+      // 两侧同源：dir 已 canonicalPath，实例 cwd 也必须走同一个函数（managedRunnerDirs 同此）
+      if (inst?.config?.cwd && canonicalPath(inst.config.cwd) === dir) {
         InstanceSubsystem.removeInstance(inst.instanceUuid, false); // 目录我们自己删，这里不删文件
         instanceRemoved = true;
         break;
@@ -927,115 +822,45 @@ async function runDelete(
   return { dir, ok: dirRemoved, steps, warnings };
 }
 
-// ---- systemd 控制。走特权助手，不直接 sudo systemctl ----
-// 为什么不放行 `sudo systemctl start actions.runner.*.service`：sudoers 的参数通配符会匹配
-// 空白，而 sudo 是把参数拼成一整串比对的，于是加个 actions.runner 前缀就能把任意单元一起带上
-// (systemctl 接受多个单元名)。glob 排不掉空白，sudo < 1.9.10 也没有锚定正则。所以校验放进
-// root 拥有的助手脚本里，sudoers 只放行助手本身。
-
-// 用 Record<SystemdAction, true> 而不是数组 + satisfies：数组只校验每个元素合法，协议里新增一个
-// 动作它照样编译得过，这里就会静默地不放行。记录型要求每个成员都显式列出，漏一个当场报错。
-const ALLOWED_ACTIONS = { start: true, stop: true, restart: true } as const satisfies Record<
-  SystemdAction,
-  true
->;
-
-// 助手已经把 job 交给 systemd 之后，最多再等多久确认它跑到位。等不到不算失败——如实回
-// settled:false，让调用方去看状态轮询，绝不把请求挂在这里（见下方 controlService 的注释）。
-const SETTLE_TIMEOUT_MS = 8000;
-const SETTLE_POLL_MS = 500;
-
-// 删除前那次停止用更长的期限。8 秒是给「面板上点启停要立刻有反馈」选的，等不到就交给状态轮询
-// 慢慢收敛；而删除等不到就只能整个中止，让人回头再来一遍，所以这里值得多等。上限仍远小于单元
-// 的 TimeoutStopSec=5min —— 目的是拿到一个确定的结论，不是陪它耗到底。
-const DELETE_SETTLE_MS = 60000;
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// 这一轮 systemctl 的效果是否已经体现出来了。
-// restart/start 光看 activeState=active 不够：restart 一个本来就在跑的单元，头几百毫秒查到的
-// 还是「旧的 active」，会把没发生的事判成已完成。所以额外比对主进程启动时间(since)变没变。
-function isSettled(action: SystemdAction, before: SystemdState | null, now: SystemdState): boolean {
-  if (action === "stop") return now.activeState === "inactive" || now.activeState === "failed";
-  // 没有操作前的基准就没法区分「新起来的」和「本来就是这样的」——querySystemd 出错时会返回
-  // 空 map(见其 catch)，before 就是 null。这种时候一律按未落定处理：宁可回 settled:false 让
-  // 页面轮询去收敛，也不能凭一个旧状态报「成功」或「失败」。
-  if (!before) return false;
-  // failed 是终态，但必须是这一轮打出来的：单元本来就 failed 时，systemd 还没把 job 出队，
-  // 头几百毫秒查到的仍是那个旧 failed，会把一个随后就成功的 restart 当场判成失败。
-  if (now.activeState === "failed")
-    return before.activeState !== "failed" || now.since !== before.since;
-  if (now.activeState !== "active") return false;
-  return action === "start" || now.since !== before.since;
-}
-
+// ---- 过渡期的薄壳：按单元名启停 ----
+//
+// 启停本体已经搬进 supervisor/systemd.ts（连同 --no-block + 自己轮询、isSettled 比对 since、
+// 助手错误三分类）。面板下发的启停一律走 supervisor/resolve.ts 的 controlRunner —— 它按目录
+// 寻址、以 .cipanel 为授权依据、在锁内过一次归属闸门。
+//
+// 这里留下的只有一条按单元名进来的路：置备写完初始 drop-in 之后要重启一次单元使其生效，
+// 那一刻 .cipanel 还没写，controlRunner 会（正确地）判它「未纳管」。第 5 步把置备改走后端的
+// attach 之后，本函数与它的调用方一起删。
 export async function controlService(
   service: string,
-  action: SystemdAction
-): Promise<ServiceControlResult> {
-  // hasOwnProperty 而不是 in：action 来自请求体，别让 "toString" 这类原型链上的键蒙混过关
-  if (!Object.prototype.hasOwnProperty.call(ALLOWED_ACTIONS, action))
-    throw new Error(`不支持的操作: ${action}`);
+  action: SupervisorAction
+): Promise<{ settled: boolean }> {
+  // 复用 resolve.ts 的收窄函数，不再抄一份动作字面量：那边的表由
+  // satisfies Record<SupervisorAction, true> 钉住完备性，协议新增一个动作时会当场编译失败，
+  // 而抄在这里的字面量只会静默地不放行新动作。
+  if (!isSupervisorAction(action))
+    throw new Error($t("TXT_CODE_RUNNER_ACTION_UNSUPPORTED", { action }));
   // 助手会再校验一次（那次才是有效的边界）；这里挡住明显非法值，省一次 sudo 往返
-  if (!SERVICE_RE.test(service)) throw new Error(`非法的服务名: ${service}`);
-
-  // 与 deleteRunner 互斥：删除窗口里的 start/restart 会把刚被卸掉的单元重新拉起来，而目录
-  // 随后就没了。顺带把同一单元的并发启停也串了起来——批量启停按单元扇出，不同 runner 各占
-  // 各的 key，互不阻塞。
-  return withRunnerLock([serviceKey(service)], "service", () => runServiceAction(service, action));
+  if (!SERVICE_RE.test(service))
+    throw new Error($t("TXT_CODE_RUNNER_SERVICE_NAME_INVALID", { service }));
+  // 与 deleteRunner 互斥：删除窗口里的 restart 会把刚被卸掉的单元重新拉起来，而目录随后就没了
+  return withRunnerLock([serviceKey(service)], "service", () => runUnitAction(service, action));
 }
 
-// 启停本体。进来时已在锁内、action 与单元名都已校验过。
-// settleMs 可覆盖：删除路径要的耐心比面板点按钮那条路长得多（见 DELETE_SETTLE_MS）。
-async function runServiceAction(
-  service: string,
-  action: SystemdAction,
-  settleMs: number = SETTLE_TIMEOUT_MS
-): Promise<ServiceControlResult> {
-  // 重启前的状态：下面判断「restart 是否真的发生了」要拿它的 since 做对比
-  const before = (await querySystemd([service])).get(service) || null;
-
-  try {
-    // 必须是异步 execFile。同步版会把 daemon 的单线程事件循环整个冻住，systemctl 慢多久就
-    // 冻多久，WebSocket 心跳(pingInterval 20s/pingTimeout 10s)一丢，面板就判这个节点掉线——
-    // 批量重启时每个 runner 冻一次，整台机器会不可达好几分钟。同文件顶部的扫描热路径同理。
-    await execFileAsync("sudo", ["-n", RUNNER_SVC_HELPER, action, service], {
-      encoding: "utf8",
-      timeout: HELPER_TIMEOUT_MS
-    });
-  } catch (err: unknown) {
-    // 分类统一走 helperErrorMessage —— 这里原本自己写了一份正则，和 install/set-env 那两份
-    // 宽严还不一致，而三处要判的是同一件事。
-    throw new Error(helperErrorMessage(`${action} ${service}`, err, HELPER_TIMEOUT_MS));
-  }
-
-  // 助手用的是 systemctl --no-block：systemd 收下 job 就返回，不等它跑完。所以上面的成功
-  // 只代表「已受理」，真正的结果要自己轮询。为什么不让 systemctl 等：runner 单元是
-  // KillMode=process + TimeoutStopSec=5min，遇上不响应 SIGTERM 的 Listener 一等就是 5 分钟，
-  // 面板请求(90s)必然超时，批量重启更是逐个叠加。这里最多等 SETTLE_TIMEOUT_MS，超了就带
-  // settled:false 返回，剩下的交给 10s 一轮的状态扫描收敛。
-  const deadline = Date.now() + settleMs;
-  let status: SystemdState | null = null;
-  for (;;) {
-    await sleep(SETTLE_POLL_MS);
-    status = (await querySystemd([service])).get(service) || null;
-    if (status && isSettled(action, before, status)) {
-      // --no-block 之后 systemctl 的退出码只代表「job 已入队」，起不来是查状态才知道的。
-      // 阻塞版当年会在这里非零退出并报错，别把这个信号丢了——照旧抛，调用方的错误路径不变。
-      // stop 落到 failed 是正常终态（单元非零退出后就停在 failed），不算失败。
-      if (action !== "stop" && status.activeState === "failed")
-        throw new Error(
-          `${action} ${service} 失败: 单元进入 failed（${status.subState}）。` +
-            `详见 journalctl -u ${service} -n 50`
-        );
-      logger.info(`[runner-scan] ${action} ${service} 完成（${status.activeState}）`);
-      return { service, action, settled: true, status };
+// 老 panel 只发得出单元名（新的发 dir）。反查出目录，让两条路最终都汇到 controlRunner 那个
+// 唯一入口，别在路由里留一条绕过 .cipanel 授权的旁路。
+//
+// 反查不到必须抛一条说得清病因的错：回空串的话会一路落到 controlRunner 的「目录必须是绝对
+// 路径」，用户看到的错误与真实原因（这个单元不属于任何纳管目录）毫无关系。
+export function dirOfSystemdUnit(service: string): string {
+  if (!SERVICE_RE.test(service))
+    throw new Error($t("TXT_CODE_RUNNER_SERVICE_NAME_INVALID", { service }));
+  for (const dir of managedRunnerDirs()) {
+    try {
+      if (readServiceName(dir) === service) return dir;
+    } catch {
+      /* 这一个读不动就跳过，别让它挡住其余目录的反查 */
     }
-    if (Date.now() >= deadline) break;
   }
-  logger.warn(
-    `[runner-scan] ${action} ${service} 已提交，但 ${settleMs}ms 内未落定` +
-      `（当前 ${status?.activeState || "未知"}/${status?.subState || "未知"}）`
-  );
-  return { service, action, settled: false, status };
+  throw new Error($t("TXT_CODE_RUNNER_UNIT_NOT_FOUND", { service }));
 }

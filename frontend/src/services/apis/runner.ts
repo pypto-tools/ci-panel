@@ -438,8 +438,10 @@ export const runnerDiagLogs = useDefineApi<
   method: "POST"
 });
 
-// 启停结果同样来自 common（common/src/runner_protocol.ts），与 daemon 一份声明
-export type { ServiceControlResult, SystemdAction, SystemdState } from "mcsmanager-common";
+// 启停结果同样来自 common（common/src/runner_protocol.ts），与 daemon 一份声明。
+// SystemdState 已从协议里移除：单元的那几个字段现在进 RunnerRuntimeState.raw，只供展示。
+// 升级窗口里 daemon 仍会回填一份同形状的 SystemdStateCompat 给还没升级的 panel。
+export type { ServiceControlResult, SystemdAction, SystemdStateCompat } from "mcsmanager-common";
 import type { ServiceControlResult, SystemdAction } from "mcsmanager-common";
 
 // 启停 systemd 托管的 runner。依赖 daemon 侧的 sudoers 免密白名单

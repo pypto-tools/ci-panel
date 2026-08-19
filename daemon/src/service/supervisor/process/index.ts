@@ -471,7 +471,16 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
     },
 
     async readListenerEnv(dir: string): Promise<RunnerEnvSection> {
-      return readListenerEnvFile(markerIdOf(canonicalPath(dir)));
+      // 没有合法 .cipanel 的目录（未纳管，但详情页仍可只读打开）没有本后端存过的任何东西 ——
+      // 回空节，而不是把「查不到纳管标记」抬成一个读取错误。写入那一侧仍然要求纳管：
+      // 没有 markerId 就没有文件名可用。
+      let markerId: string;
+      try {
+        markerId = markerIdOf(canonicalPath(dir));
+      } catch {
+        return { present: false, vars: [] };
+      }
+      return readListenerEnvFile(markerId);
     },
 
     async writeListenerEnv(dir: string, vars: RunnerEnvVar[]): Promise<void> {

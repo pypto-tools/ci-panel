@@ -50,10 +50,14 @@ describe("every declaration agrees", () => {
   it("finds the TypeScript copies at all", () => {
     // Zero would make the next case pass vacuously; the count is deliberately a floor rather than
     // an exact number, since a new copy is not itself a defect — a diverging one is.
+    //
+    // The floor dropped from three to two when the environment module stopped deriving unit names
+    // itself: unit names are systemd's business and now live only in the systemd backend and in
+    // the scan module's reverse lookup. The privileged helper's copy is checked separately below.
     expect(
       SOURCES.length,
       "no SERVICE_RE literal anywhere under daemon/src"
-    ).toBeGreaterThanOrEqual(3);
+    ).toBeGreaterThanOrEqual(2);
   });
 
   it("the TypeScript copies are byte-identical", () => {
@@ -135,25 +139,30 @@ describe("readRunnerEnv enforces the boundary end to end", () => {
     fs.writeFileSync(path.join(runnerDir, ".runner"), "{}");
   });
 
-  it("refuses a directory outside the scan roots", () => {
-    expect(() => readRunnerEnv("/etc")).toThrow(/只允许在扫描根下操作/);
+  // readRunnerEnv is async now: the listener scope is whatever the backend stores, and a
+  // container or remote backend cannot answer that synchronously. The assertions are unchanged,
+  // only their form is — and `expect(() => asyncFn()).toThrow()` would pass vacuously against a
+  // rejected promise, so each case awaits.
+  it("refuses a directory outside the scan roots", async () => {
+    await expect(readRunnerEnv("/etc")).rejects.toThrow(/只允许在扫描根下操作/);
   });
 
-  it("refuses a directory that is not a runner", () => {
+  it("refuses a directory that is not a runner", async () => {
     const plain = path.join(SCAN_ROOT, "env-repo", "not-a-runner");
     fs.mkdirsSync(plain);
-    expect(() => readRunnerEnv(plain)).toThrow(/不是 runner 目录/);
+    await expect(readRunnerEnv(plain)).rejects.toThrow(/不是 runner 目录/);
   });
 
-  it("refuses a malformed unit name rather than passing it on", () => {
-    // .service is attacker-writable if the runner account is compromised; reading it must
-    // fail loudly instead of feeding the value to systemctl or to a path join.
+  it("refuses a malformed unit name rather than passing it on", async () => {
+    // .service is attacker-writable if the runner account is compromised; reading it must fail
+    // loudly instead of feeding the value to systemctl or to a path join. That file is also what
+    // makes this directory resolve to the systemd backend, so the refusal comes from there now.
     fs.writeFileSync(path.join(runnerDir, ".service"), "../../etc/evil.service");
-    expect(() => readRunnerEnv(runnerDir)).toThrow(/非法的服务名/);
+    await expect(readRunnerEnv(runnerDir)).rejects.toThrow(/非法的服务名/);
   });
 
-  it("treats an absent .service as 'no unit installed', not as an error", () => {
+  it("treats an absent .service as 'no unit installed', not as an error", async () => {
     fs.removeSync(path.join(runnerDir, ".service"));
-    expect(() => readRunnerEnv(runnerDir)).not.toThrow();
+    await expect(readRunnerEnv(runnerDir)).resolves.toBeTruthy();
   });
 });

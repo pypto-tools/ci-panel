@@ -20,31 +20,15 @@ import { logger } from "./log";
 import RemoteRequest from "./remote_command";
 import RemoteServiceSubsystem from "./remote_service";
 import { $t } from "../i18n";
+import type { RepoRunnerRef, ScannedRunner } from "mcsmanager-common";
 import { errMessage } from "../utils/error";
 
 const CATEGORY = "RepoConfig";
 
-// 对齐 daemon 侧 Instance.STATUS_RUNNING
-const INSTANCE_STATUS_RUNNING = 3;
-
-export interface RepoRunnerRef {
-  daemonId: string;
-  nodeName: string;
-  dir: string;
-  dirName: string;
-  agentName: string; // runner 在 GitHub 上的名字（未必等于目录名）
-  managedBy: "systemd" | "panel" | "both" | "none";
-  service: string; // systemd 单元名，空 = 没装服务
-  instanceUuid: string; // 面板实例，空 = 面板没托管
-  running: boolean;
-  busy: boolean; // 正在跑 job——停它会中断 CI 任务
-  statusText: string; // 给 UI 直接显示的状态
-  since: string; // systemd 主进程启动时间
-  source: "provision" | "import" | ""; // .cipanel 里的纳管来源
-  group: string; // .cipanel 里的所属组
-  markerId: string; // .cipanel 里的管理标识
-  broken?: string;
-}
+// 三方共用的声明只在 common 里写一份；这里转出去，免得已有的 import 全要改路径。
+// 之前 panel 与 frontend 各手写一份 RepoRunner*，而前端那份不引 common，改字段时编译器
+// 罩不到它 —— 孤儿与冲突统计会静默归零。
+export type { RepoRunnerRef };
 
 export interface RunnerIndex {
   // slug -> 该仓库在所有节点上的 runner
@@ -55,22 +39,21 @@ export interface RunnerIndex {
   failedNodes: Array<{ daemonId: string; nodeName: string; error: string }>;
 }
 
-// 把 daemon 扫描结果转成面板视角的 runner 引用
-function toRunnerRef(daemonId: string, nodeName: string, r: any): RepoRunnerRef {
-  const systemd = r.systemd || null;
-  const managedBy = r.managedBy as RepoRunnerRef["managedBy"];
+// 老 daemon 的载荷兜底：节点还没升级时没有 runtime，直接读它会让整台节点的 runner 恒判离线、
+// 统计恒 0。那种载荷里 systemd 字段还在，解析它即可。与 daemon 侧的回填是一对，1.2 一起删。
+export function legacyRunning(r: ScannedRunner): boolean {
+  const systemd = r.systemd;
+  return Boolean(systemd?.loaded && systemd.activeState === "active");
+}
 
-  let running = false;
-  let statusText = "";
-  if (systemd?.loaded) {
-    running = systemd.activeState === "active";
-    statusText = `${systemd.activeState}/${systemd.subState}`;
-  } else if (r.instanceUuid) {
-    running = r.instanceStatus === INSTANCE_STATUS_RUNNING;
-    statusText = running ? "运行中（面板实例）" : "已停止（面板实例）";
-  } else {
-    statusText = "无人托管";
-  }
+// 把 daemon 扫描结果转成面板视角的 runner 引用。
+// 入参类型是 common 的 ScannedRunner 而不是 any：那个 any 是三份手写声明的产物，daemon 改个
+// 字段名它编译期毫无动静。
+export function toRunnerRef(daemonId: string, nodeName: string, r: ScannedRunner): RepoRunnerRef {
+  // 「在线」只读归一化后的 runtime.running，不在这里第二次解析 activeState。
+  // 「面板实例在跑」那条老分支删掉：句柄实例不带启动命令，永远不会 running，那条分支只会
+  // 把一个正常跑着的 runner 报成「已停止（面板实例）」。
+  const running = r.runtime ? Boolean(r.runtime.running) : legacyRunning(r);
 
   return {
     daemonId,
@@ -78,17 +61,21 @@ function toRunnerRef(daemonId: string, nodeName: string, r: any): RepoRunnerRef 
     dir: r.dir || "",
     dirName: r.dirName || "",
     agentName: r.agentName || "",
-    managedBy,
-    service: systemd?.service || "",
-    instanceUuid: r.instanceUuid || "",
+    // runtime 在场时以它带的那个为准：顶层 supervisor 在协议里是可选的，缺了就退到 runtime，
+    // 再缺才当「外部托管」—— 否则一个正常的 runner 会被显示成外部托管并禁掉全部控制。
+    supervisor: r.supervisor ?? r.runtime?.supervisor ?? "none",
+    runtime: r.runtime ?? null,
+    managed: Boolean(r.managed),
     running,
-    busy: Boolean(r.busy),
-    statusText,
-    since: systemd?.since || "",
+    busy: Boolean(r.runtime?.busy),
+    since: r.runtime?.since || "",
+    instanceUuid: r.instanceUuid || "",
     source: r.source || "",
     group: r.group || "",
     markerId: r.markerId || "",
-    broken: r.broken
+    broken: r.broken,
+    // 过渡期：老节点没有 runtime，单元名只能从这里取，而启停请求要带着它发回去
+    systemd: r.systemd ?? null
   };
 }
 
@@ -179,9 +166,7 @@ class RepoService {
     }
     const runners = index.bySlug.get(slug) || [];
     if (runners.length > 0) {
-      throw new Error(
-        $t("TXT_CODE_REPO_REMOVE_HAS_RUNNERS", { slug, count: runners.length })
-      );
+      throw new Error($t("TXT_CODE_REPO_REMOVE_HAS_RUNNERS", { slug, count: runners.length }));
     }
     StorageSubsystem.delete(CATEGORY, slugToFileId(slug));
     this.repos.delete(slug);
@@ -250,10 +235,12 @@ class RepoService {
       total: runners.length,
       running: runners.filter((r) => r.running).length,
       busy: runners.filter((r) => r.busy).length,
-      // 已注册但没人托管的 runner：既没 systemd 服务、面板也没托管，永远接不到任务
-      orphaned: runners.filter((r) => r.managedBy === "none").length,
-      // systemd 和面板同时托管同一个目录：会跑起两个 Runner.Listener 抢同一个身份
-      conflicted: runners.filter((r) => r.managedBy === "both").length
+      // 有进程在跑却没有任何托管方认领它：多半是有人手动起的，面板既不敢停也管不了它。
+      // 与前端的冲突横幅同一条谓词：托管方式声明为 none 的节点上，foreign 是预期状态，不算孤儿。
+      orphaned: runners.filter((r) => r.runtime?.ownership === "foreign" && r.supervisor !== "none")
+        .length,
+      // 不止一个托管方，或被声明之外的后端管着：会跑起两个 Runner.Listener 抢同一个身份
+      conflicted: runners.filter((r) => r.runtime?.ownership === "conflict").length
     });
 
     const repos = this.list().map((config) => ({

@@ -1390,5 +1390,19 @@
   "TXT_CODE_RUNNER_PROVISION_STEP_ENV_RESTART": "Restart to apply the environment variables",
   "TXT_CODE_RUNNER_ENV_TARGET_UNKNOWN": "Unknown environment variable scope: {{target}}.",
   "TXT_CODE_RUNNER_UNIT_NOT_FOUND": "No managed runner directory owns the unit {{service}}.",
-  "TXT_CODE_RUNNER_UNIT_FAILED": "The systemd unit is in the failed state ({{subState}})."
+  "TXT_CODE_RUNNER_UNIT_FAILED": "The systemd unit is in the failed state ({{subState}}).",
+  "TXT_CODE_RUNNER_COL_SUPERVISOR": "Supervisor",
+  "TXT_CODE_RUNNER_COL_OWNERSHIP": "State",
+  "TXT_CODE_RUNNER_SUPERVISOR_SYSTEMD": "systemd",
+  "TXT_CODE_RUNNER_SUPERVISOR_PROCESS": "Process",
+  "TXT_CODE_RUNNER_SUPERVISOR_NONE_LABEL": "External",
+  "TXT_CODE_RUNNER_OWNERSHIP_SELF": "Supervised",
+  "TXT_CODE_RUNNER_OWNERSHIP_IDLE": "Stopped",
+  "TXT_CODE_RUNNER_OWNERSHIP_FOREIGN": "Unclaimed",
+  "TXT_CODE_RUNNER_OWNERSHIP_CONFLICT": "Conflict",
+  "TXT_CODE_RUNNER_OWNERSHIP_UNKNOWN": "Unknown",
+  "TXT_CODE_RUNNER_BATCH_NONE_CONTROLLABLE": "None of the selected runners can be controlled from the panel.",
+  "TXT_CODE_RUNNER_BATCH_SKIPPED": "{count} more cannot be controlled from the panel and will be skipped.",
+  "TXT_CODE_RUNNER_ENV_SCOPE_LISTENER": "Listener environment",
+  "TXT_CODE_RUNNER_BUSY": "Running a job"
 }

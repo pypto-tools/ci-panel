@@ -1,10 +1,6 @@
 // 一键添加 Runner 接口（自研补充，对应 panel 的 /api/runner 路由）
 import { useDefineApi } from "@/stores/useDefineApi";
-import type {
-  RegisterRunnerItem,
-  RegisterRunnersResponse,
-  RunnerSource
-} from "mcsmanager-common";
+import type { RegisterRunnerItem, RegisterRunnersResponse, RunnerSource } from "mcsmanager-common";
 
 export interface ProvisionRunnerResult {
   instanceUuid: string;
@@ -260,30 +256,8 @@ export const collectRunners = useDefineApi<
 });
 
 // ---- 扫描：以磁盘为准列出节点上真实存在的 runner（只读，不建实例）----
-export interface ScannedRunner {
-  dir: string;
-  dirName: string;
-  repo: string;
-  agentName: string;
-  systemd: {
-    service: string;
-    loaded: boolean;
-    activeState: string;
-    subState: string;
-    enabled: string;
-    since: string;
-  } | null;
-  instanceUuid: string;
-  instanceStatus: number;
-  managedBy: "systemd" | "panel" | "both" | "none";
-  busy: boolean; // 正在跑 job
-  managed: boolean; // 是否已纳管（有 .cipanel）
-  markerId: string; // marker 管理标识，空 = 未纳管
-  source: "provision" | "import" | ""; // 纳管来源
-  group: string; // 所属组
-  exists: boolean; // 目录是否还在且含 .runner
-  broken?: string;
-}
+// 形状来自 common，与 daemon / panel 同一份声明：这里原本是第三份手写镜像。
+export type { ScannedRunner };
 
 export const scanRunners = useDefineApi<
   { params: { daemonId: string }; data: { roots?: string[] } },
@@ -441,41 +415,40 @@ export const runnerDiagLogs = useDefineApi<
 // 启停结果同样来自 common（common/src/runner_protocol.ts），与 daemon 一份声明。
 // SystemdState 已从协议里移除：单元的那几个字段现在进 RunnerRuntimeState.raw，只供展示。
 // 升级窗口里 daemon 仍会回填一份同形状的 SystemdStateCompat 给还没升级的 panel。
-export type { ServiceControlResult, SystemdAction, SystemdStateCompat } from "mcsmanager-common";
-import type { ServiceControlResult, SystemdAction } from "mcsmanager-common";
+export type { ControlOutcome, SupervisorAction, SystemdStateCompat } from "mcsmanager-common";
+import type {
+  ControlOutcome,
+  EnvTarget,
+  RunnerEnvResult,
+  RunnerEnvSection,
+  RunnerEnvVar,
+  ScannedRunner,
+  SupervisorAction
+} from "mcsmanager-common";
 
 // 启停 systemd 托管的 runner。依赖 daemon 侧的 sudoers 免密白名单
+// 按**目录**寻址：单元名只有 systemd 托管才有。过渡期两个字段都发（service 留给还没升级的节点）
 export const controlRunnerService = useDefineApi<
-  { params: { daemonId: string }; data: { service: string; action: SystemdAction } },
-  ServiceControlResult
+  {
+    params: { daemonId: string };
+    data: { dir: string; service?: string; action: SupervisorAction };
+  },
+  ControlOutcome
 >({
   url: "/api/runner/service_control",
   method: "POST"
 });
 
-// ---- runner 环境变量：两个目标 ----
-//   override —— systemd drop-in override.conf 的 Environment=，进监听进程（代理放这里）
-//   dotenv   —— runner 目录的 .env，只进 job/step（设备号、库路径放这里）
-export type EnvTarget = "override" | "dotenv";
-
-export interface RunnerEnvVar {
-  key: string;
-  value: string;
-}
-
-// 单个目标文件的一节：是否存在 + 其中的变量
-export interface RunnerEnvSection {
-  present: boolean;
-  vars: RunnerEnvVar[];
-}
-
-export interface RunnerEnvResult {
-  dir: string;
-  service: string; // systemd 单元名，空 = 未装服务
-  hasSystemd: boolean; // 未装服务则不能写 override
-  override: RunnerEnvSection; // systemd drop-in（进监听进程）
-  dotenv: RunnerEnvSection; // .env（只进 job/step）
-}
+// ---- runner 环境变量：两个作用域 ----
+//   override（线上取值）—— 进「监听进程」：systemd 写 drop-in，进程托管写 daemon 自己的 env
+//                          文件。代理这类要让 runner 连上 GitHub 的变量必须放这里。
+//   dotenv              —— runner 目录的 .env，只进 job/step（设备号、库路径放这里）
+//
+// 线上取值刻意没跟着内部命名改：还没升级的 daemon 会把认不出的值一律归一成 override，
+// 于是只该进 job 的变量会被静默写进 root 拥有的 drop-in。
+//
+// 形状全部来自 common，与 daemon / panel 同一份声明。
+export type { EnvTarget, RunnerEnvSection, RunnerEnvVar, RunnerEnvResult };
 
 // 读某 runner 两个目标当前托管的环境变量（只读）
 export const getRunnerEnv = useDefineApi<
@@ -524,19 +497,19 @@ export const setRunnerEnvBatch = useDefineApi<
   method: "POST"
 });
 
-// 批量启停/重启 systemd 托管的 runner（panel 侧并行执行，无 service 的项会被跳过）
+// 批量启停/重启（panel 侧并行执行，没有目录的项会被跳过）
 export const controlRunnerServiceBatch = useDefineApi<
   {
     params: { daemonId: string };
     data: {
-      items: Array<{ dir: string; service: string }>;
-      action: SystemdAction;
+      items: Array<{ dir: string; service?: string }>;
+      action: SupervisorAction;
       concurrency?: number;
     };
   },
   {
     results: Array<
-      { dir: string; service: string; ok: boolean; error?: string } & Partial<ServiceControlResult>
+      { dir: string; service?: string; ok: boolean; error?: string } & Partial<ControlOutcome>
     >;
   }
 >({

@@ -30,6 +30,16 @@ import {
   type RunnerEnvVar,
   type EnvTarget
 } from "@/services/apis/runner";
+import { t } from "@/lang/i18n";
+import {
+  canControl,
+  kindLabel,
+  ownershipHint,
+  ownershipTag,
+  serviceOf,
+  shouldWarnConflict
+} from "@/tools/supervisor";
+import type { SupervisorAction } from "mcsmanager-common";
 
 const route = useRoute();
 const router = useRouter();
@@ -41,30 +51,24 @@ const runner = ref<ScannedRunner | null>(null);
 const loading = ref(false);
 const acting = ref(false);
 
-// 面板实例状态码 3 = 运行中（对齐 daemon Instance.STATUS_RUNNING）
-const INSTANCE_RUNNING = 3;
-
-const running = computed(() => {
-  const r = runner.value;
-  if (!r) return false;
-  if (r.systemd?.loaded) return r.systemd.activeState === "active";
-  if (r.instanceUuid) return r.instanceStatus === INSTANCE_RUNNING;
-  return false;
-});
+// 「在线」只读 daemon 归一化后的那个字段：句柄实例永远不 running（它不带启动命令），
+// 按它判在线会把一个正常跑着的 runner 报成已停止。
+const running = computed(() => Boolean(runner.value?.runtime?.running));
 
 const statusText = computed(() => {
   const r = runner.value;
   if (!r) return "—";
-  if (r.managedBy === "none") return "无人托管";
-  if (r.busy) return "正在跑 job";
-  return running.value ? "空闲待命" : "已停止";
+  if (r.runtime?.busy) return t("TXT_CODE_RUNNER_BUSY");
+  return ownershipTag(r).label;
 });
-const statusBadge = computed(() => {
+
+// a-badge 的 status 只认这五个值，与标签表的颜色不是同一套，所以显式映射
+const statusBadge = computed<"success" | "processing" | "default" | "error" | "warning">(() => {
   const r = runner.value;
   if (!r) return "default";
-  if (r.busy) return "processing";
-  if (r.managedBy === "both") return "error";
-  if (r.managedBy === "none") return "warning";
+  if (r.runtime?.busy) return "processing";
+  if (r.runtime?.ownership === "conflict") return "error";
+  if (shouldWarnConflict(r)) return "warning";
   return running.value ? "success" : "default";
 });
 
@@ -88,17 +92,20 @@ async function loadState(silent = false) {
   }
 }
 
-// ---- systemd 启停（正在跑 job 的停/重启要二次确认，避免中断 CI）----
-async function doControl(action: "start" | "stop" | "restart") {
+// ---- 启停（正在跑 job 的停/重启要二次确认，避免中断 CI）----
+async function doControl(action: SupervisorAction) {
   const r = runner.value;
-  if (!r?.systemd?.service)
-    return message.error("这个 runner 没有 systemd 服务，面板管不了它的启停");
+  if (!r) return;
+  // 与 daemon 侧那道闸门同一套规则，理由也由它给出
+  const check = canControl(r, action);
+  if (!check.ok) return message.error(check.reason);
   acting.value = true;
   try {
     const { execute, state } = controlRunnerService();
     await execute({
       params: { daemonId: daemonId.value },
-      data: { service: r.systemd.service, action }
+      // 过渡期两个字段都发：dir 是新 daemon 的寻址依据，service 留给还没升级的节点
+      data: { dir: r.dir, service: serviceOf(r), action }
     });
     // settled=false：systemd 收下了 job 但还没跑完（多半是这个 runner 停不下来）。
     // 不能报"成功"——它可能几分钟后才真的动，页面的定时刷新会把最终状态显示出来。
@@ -114,8 +121,14 @@ async function doControl(action: "start" | "stop" | "restart") {
     acting.value = false;
   }
 }
+// 模板里要按动作各判一次，包一层免得每处都写 runner.value 的判空
+function controlCheck(action: SupervisorAction) {
+  const r = runner.value;
+  return r ? canControl(r, action) : { ok: false, reason: "" };
+}
+
 function confirmControl(action: "start" | "stop" | "restart") {
-  if (action === "start" || !runner.value?.busy) return doControl(action);
+  if (action === "start" || !runner.value?.runtime?.busy) return doControl(action);
   Modal.confirm({
     title: `${runner.value?.agentName} 正在跑 CI 任务`,
     icon: () => h(ExclamationCircleOutlined),
@@ -156,7 +169,7 @@ function openConfig() {
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const overrideVars = ref<RunnerEnvVar[]>([]);
 const dotenvVars = ref<RunnerEnvVar[]>([]);
-const envHasSystemd = ref(false);
+const envCanWriteListener = ref(false);
 const envLoading = ref(false);
 // 加载失败时编辑器是空的，而保存走 replace(整表覆盖)——此时点保存会清空该 runner 全部变量。
 // 故加载失败即禁用保存，必须重试成功后才能改。
@@ -172,7 +185,7 @@ async function loadEnv() {
   try {
     const { execute, state } = getRunnerEnv();
     await execute({ params: { daemonId: daemonId.value }, data: { dir: r.dir } });
-    envHasSystemd.value = Boolean(state.value?.hasSystemd);
+    envCanWriteListener.value = Boolean(state.value?.canWriteListenerEnv);
     overrideVars.value = (state.value?.override?.vars || []).map((v) => ({
       key: v.key,
       value: v.value
@@ -230,15 +243,15 @@ async function saveEnv(target: EnvTarget) {
 // 环境变量改动需重启单元才生效——弹窗提示，正在跑 job 的二次确认（复用启停确认）
 function promptRestart() {
   const r = runner.value;
-  if (!r?.systemd?.service) return;
+  if (!r || !canControl(r, "restart").ok) return;
   Modal.confirm({
     title: "重启 runner 使环境变量生效？",
     icon: () => h(ExclamationCircleOutlined),
-    content: r.busy
-      ? "环境变量已写入，需重启单元才生效。该 runner 正在跑 job，重启会当场中断它！"
-      : "环境变量已写入，需重启单元才生效。",
-    okText: r.busy ? "仍然重启" : "立即重启",
-    okType: r.busy ? "danger" : "primary",
+    content: r.runtime?.busy
+      ? "环境变量已写入，需重启才生效。该 runner 正在跑 job，重启会当场中断它！"
+      : "环境变量已写入，需重启才生效。",
+    okText: r.runtime?.busy ? "仍然重启" : "立即重启",
+    okType: r.runtime?.busy ? "danger" : "primary",
     cancelText: "稍后手动重启",
     onOk: () => doControl("restart")
   });
@@ -286,7 +299,7 @@ async function doDelete() {
       data: {
         dir: r.dir,
         repo: r.repo,
-        force: Boolean(r.busy),
+        force: Boolean(r.runtime?.busy),
         removeToken: manualToken.value.trim()
       }
     });
@@ -351,11 +364,11 @@ function goBack() {
     </div>
 
     <a-alert
-      v-if="runner?.managedBy === 'both'"
+      v-if="runner && shouldWarnConflict(runner)"
       type="error"
       show-icon
       style="margin-bottom: 12px"
-      message="托管冲突：systemd 和面板都在托管这个目录，可能跑起两个 Runner.Listener 抢同一个 GitHub 身份"
+      :message="ownershipHint(runner!)"
     />
     <a-alert
       v-if="runner?.broken"
@@ -384,13 +397,16 @@ function goBack() {
           <a-descriptions :column="1" size="small" bordered>
             <a-descriptions-item label="名称">{{ runner?.agentName || "—" }}</a-descriptions-item>
             <a-descriptions-item label="仓库">{{ runner?.repo || "—" }}</a-descriptions-item>
-            <a-descriptions-item label="托管方式">
-              <a-tag v-if="runner?.managedBy === 'systemd'" color="blue">systemd</a-tag>
-              <a-tag v-else-if="runner?.managedBy === 'panel'" color="purple">面板实例</a-tag>
-              <a-tag v-else-if="runner?.managedBy === 'both'" color="error">
-                <WarningOutlined /> 冲突
-              </a-tag>
-              <a-tag v-else color="warning"><WarningOutlined /> 无人托管</a-tag>
+            <a-descriptions-item :label="t('TXT_CODE_RUNNER_COL_SUPERVISOR')">
+              <a-tag>{{ kindLabel(runner?.supervisor) }}</a-tag>
+            </a-descriptions-item>
+            <a-descriptions-item :label="t('TXT_CODE_RUNNER_COL_OWNERSHIP')">
+              <a-tooltip :title="runner ? ownershipHint(runner) : ''">
+                <a-tag :color="runner ? ownershipTag(runner).color : 'default'">
+                  <WarningOutlined v-if="runner && shouldWarnConflict(runner)" />
+                  {{ runner ? ownershipTag(runner).label : "—" }}
+                </a-tag>
+              </a-tooltip>
             </a-descriptions-item>
             <a-descriptions-item label="来源">
               <span v-if="runner?.source === 'provision'">面板创建</span>
@@ -398,50 +414,63 @@ function goBack() {
               <span v-else>—</span>
             </a-descriptions-item>
             <a-descriptions-item label="所属组">{{ runner?.group || "—" }}</a-descriptions-item>
-            <a-descriptions-item label="systemd 单元">
-              {{
-                runner?.systemd?.service || "—"
-              }}
+            <!-- 单元名只有 systemd 托管才有，且只供展示与排障（判断逻辑一律不读 raw） -->
+            <a-descriptions-item v-if="runner && serviceOf(runner)" label="systemd 单元">
+              {{ serviceOf(runner!) }}
             </a-descriptions-item>
             <a-descriptions-item label="启动于">
-              {{
-                shortTime(runner?.systemd?.since)
-              }}
+              {{ shortTime(runner?.runtime?.since) }}
             </a-descriptions-item>
             <a-descriptions-item label="目录">
               <span style="font-size: 12px; word-break: break-all">{{ runner?.dir }}</span>
             </a-descriptions-item>
           </a-descriptions>
 
-          <!-- systemd 启停 -->
-          <div v-if="runner?.systemd?.service" style="margin-top: 12px">
+          <!-- 启停。按钮本身的禁用与理由由 canControl 给（下面每个按钮各自判一次） -->
+          <!-- 未纳管也照样渲染这一组：藏起来的话，用户既看不到按钮也拿不到「为什么不行」，
+               而 canControl 给的正是那句理由 -->
+          <div v-if="runner" style="margin-top: 12px">
+            <!-- 禁用与理由都由 canControl 说了算。tooltip 包一层 span：禁用的按钮不派发
+                 鼠标事件，直接挂在按钮上的提示不会显示，而这里的理由正是用户最需要看的 -->
             <a-space>
-              <a-button
-                v-if="!running"
-                type="primary"
-                size="small"
-                :loading="acting"
-                @click="confirmControl('start')"
-              >
-                启动
-              </a-button>
-              <a-button
-                v-else
-                danger
-                size="small"
-                :loading="acting"
-                @click="confirmControl('stop')"
-              >
-                停止
-              </a-button>
-              <a-button
-                size="small"
-                :loading="acting"
-                :disabled="!running"
-                @click="confirmControl('restart')"
-              >
-                重启
-              </a-button>
+              <a-tooltip v-if="!running" :title="controlCheck('start').reason">
+                <span>
+                  <a-button
+                    type="primary"
+                    size="small"
+                    :loading="acting"
+                    :disabled="!controlCheck('start').ok"
+                    @click="confirmControl('start')"
+                  >
+                    启动
+                  </a-button>
+                </span>
+              </a-tooltip>
+              <a-tooltip v-else :title="controlCheck('stop').reason">
+                <span>
+                  <a-button
+                    danger
+                    size="small"
+                    :loading="acting"
+                    :disabled="!controlCheck('stop').ok"
+                    @click="confirmControl('stop')"
+                  >
+                    停止
+                  </a-button>
+                </span>
+              </a-tooltip>
+              <a-tooltip :title="controlCheck('restart').reason">
+                <span>
+                  <a-button
+                    size="small"
+                    :loading="acting"
+                    :disabled="!controlCheck('restart').ok"
+                    @click="confirmControl('restart')"
+                  >
+                    重启
+                  </a-button>
+                </span>
+              </a-tooltip>
             </a-space>
           </div>
         </a-card>
@@ -481,7 +510,7 @@ function goBack() {
       @ok="doDelete"
     >
       <a-alert
-        v-if="runner?.busy"
+        v-if="runner?.runtime?.busy"
         type="error"
         show-icon
         style="margin-bottom: 12px"
@@ -489,7 +518,7 @@ function goBack() {
       />
       <p style="margin-bottom: 8px">此操作<strong>不可逆</strong>，将会：</p>
       <ul style="padding-left: 18px; margin: 0 0 12px">
-        <li>停止并卸载 systemd 服务</li>
+        <li>停止并从托管方收回</li>
         <li>从 GitHub 注销该 runner</li>
         <li>删除面板句柄实例与纳管标记</li>
         <li>
@@ -534,9 +563,7 @@ function goBack() {
           <span style="font-size: 12px; word-break: break-all">{{ runner?.dir }}</span>
         </a-descriptions-item>
         <a-descriptions-item label="句柄实例">
-          {{
-            runner?.instanceUuid || "—"
-          }}
+          {{ runner?.instanceUuid || "—" }}
         </a-descriptions-item>
       </a-descriptions>
 
@@ -580,13 +607,13 @@ function goBack() {
             type="info"
             show-icon
             style="margin: 8px 0 12px"
-            message="写入 systemd 单元的 Environment=，进「监听进程」。代理这类要让 runner 连上 GitHub 的变量必须放这里。改后需重启单元生效。"
+            message="写入监听进程的环境。代理这类要让 runner 连上 GitHub 的变量必须放这里。改后需重启才生效。"
           />
           <a-alert
-            v-if="!envHasSystemd"
+            v-if="!envCanWriteListener"
             type="warning"
             show-icon
-            message="该 runner 未装 systemd 服务，无法设置 systemd 级环境变量。"
+            :message="t('TXT_CODE_RUNNER_LISTENER_ENV_UNAVAILABLE')"
           />
           <template v-else>
             <a-spin :spinning="envLoading">

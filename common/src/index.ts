@@ -30,6 +30,7 @@ export type {
   RegisterRunnerItem,
   RegisterRunnerResult,
   RegisterRunnersResponse,
+  RepoRunnerRef,
   RunnerEnvResult,
   RunnerEnvSection,
   RunnerEnvVar,

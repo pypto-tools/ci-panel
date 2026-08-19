@@ -17,7 +17,9 @@ import type { RunnerSource } from "mcsmanager-common";
 
 export const MARKER_FILE = ".cipanel";
 // v2：新增 labels 字段。v1 老 marker 无 labels，读出为 ""（标签未知），安全降级。
-const MARKER_VERSION = 2;
+// v3：新增 supervisor（托管意图）。v1/v2 老 marker 无此字段，由 resolveSupervisor 推断，
+// 不需要迁移脚本。
+const MARKER_VERSION = 3;
 
 // source 刻意只记「来源」（创建还是导入）这个不变量，不记「现在实际被谁管着」这种会漂移的
 // 观测结果——后者每次探测现算，存进静态文件只会过期误导。
@@ -107,7 +109,14 @@ export function readMarker(dir: string): RunnerMarker | null {
 // 这样重复纳管既不会换掉管理标识，也不会把「创建」误改成「导入」。
 export function writeMarker(
   dir: string,
-  data: { source: RunnerSource; repo?: string; group?: string; labels?: string; id?: string }
+  data: {
+    source: RunnerSource;
+    repo?: string;
+    group?: string;
+    labels?: string;
+    id?: string;
+    supervisor?: string;
+  }
 ): RunnerMarker {
   const existing = readMarker(dir);
   const marker: RunnerMarker = existing
@@ -118,7 +127,10 @@ export function writeMarker(
         // 空串同样应回退到既有值，否则重复 provision 会把已存的 group/labels 抹掉，runner 掉出标签组。
         repo: data.repo || existing.repo,
         group: data.group || existing.group,
-        labels: data.labels || existing.labels
+        labels: data.labels || existing.labels,
+        // 已经定过的意图不许被后来的调用改写：换托管方式意味着换一套认领判据，
+        // 而旧托管方可能还在跑 —— 那是「两个托管方抢同一个 runner」的造法。
+        supervisor: existing.supervisor || data.supervisor
       }
     : {
         v: MARKER_VERSION,
@@ -127,7 +139,8 @@ export function writeMarker(
         repo: data.repo || "",
         labels: data.labels || "",
         source: data.source,
-        managedSince: Date.now()
+        managedSince: Date.now(),
+        supervisor: data.supervisor
       };
   fs.writeFileSync(markerPath(dir), JSON.stringify(marker, null, 2) + "\n", "utf8");
   return marker;

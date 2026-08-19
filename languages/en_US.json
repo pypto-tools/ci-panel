@@ -1379,5 +1379,6 @@
   "TXT_CODE_RUNNER_SPAWN_FAILED": "Failed to start the runner process in {{dir}}; see the node log for the cause.",
   "TXT_CODE_RUNNER_STOP_NOT_SETTLED": "The runner in {{dir}} did not stop within the deadline.",
   "TXT_CODE_RUNNER_DETACH_HINT_PROCESS": "Stop the runner process group on the node (kill -INT -<pgid>), then retry.",
-  "TXT_CODE_RUNNER_DELETE_STEP_SUPERVISOR": "Stop and detach from the supervisor"
+  "TXT_CODE_RUNNER_DELETE_STEP_SUPERVISOR": "Stop and detach from the supervisor",
+  "TXT_CODE_RUNNER_PROVISION_STEP_SUPERVISOR": "Hand over to the supervisor"
 }

@@ -61,7 +61,9 @@ export function toRunnerRef(daemonId: string, nodeName: string, r: ScannedRunner
     dir: r.dir || "",
     dirName: r.dirName || "",
     agentName: r.agentName || "",
-    supervisor: r.supervisor ?? "none",
+    // runtime 在场时以它带的那个为准：顶层 supervisor 在协议里是可选的，缺了就退到 runtime，
+    // 再缺才当「外部托管」—— 否则一个正常的 runner 会被显示成外部托管并禁掉全部控制。
+    supervisor: r.supervisor ?? r.runtime?.supervisor ?? "none",
     runtime: r.runtime ?? null,
     managed: Boolean(r.managed),
     running,
@@ -71,7 +73,9 @@ export function toRunnerRef(daemonId: string, nodeName: string, r: ScannedRunner
     source: r.source || "",
     group: r.group || "",
     markerId: r.markerId || "",
-    broken: r.broken
+    broken: r.broken,
+    // 过渡期：老节点没有 runtime，单元名只能从这里取，而启停请求要带着它发回去
+    systemd: r.systemd ?? null
   };
 }
 

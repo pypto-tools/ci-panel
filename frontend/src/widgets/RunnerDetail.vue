@@ -427,7 +427,9 @@ function goBack() {
           </a-descriptions>
 
           <!-- 启停。按钮本身的禁用与理由由 canControl 给（下面每个按钮各自判一次） -->
-          <div v-if="runner?.managed" style="margin-top: 12px">
+          <!-- 未纳管也照样渲染这一组：藏起来的话，用户既看不到按钮也拿不到「为什么不行」，
+               而 canControl 给的正是那句理由 -->
+          <div v-if="runner" style="margin-top: 12px">
             <!-- 禁用与理由都由 canControl 说了算。tooltip 包一层 span：禁用的按钮不派发
                  鼠标事件，直接挂在按钮上的提示不会显示，而这里的理由正是用户最需要看的 -->
             <a-space>

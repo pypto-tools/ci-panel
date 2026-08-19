@@ -60,6 +60,15 @@ function clampConcurrency(v: unknown, def = 5): number {
   return Number.isFinite(n) && n >= 1 ? Math.min(Math.floor(n), 10) : def;
 }
 
+// runner 目录来自浏览器，转发之前先在这道边界上收一次形状。
+//
+// daemon 侧另有真正的授权闸门（.cipanel 凭据、扫描根边界），这里挡的是别的东西：非字符串
+// （String(obj) 会造出 "[object Object]" 这种能通过 truthy 判断的值）、空串、以及带 NUL 的
+// 路径。panel 的职责是不把明显畸形的输入原样扇出去，而不是替 daemon 判权限。
+function isForwardableDir(v: unknown): v is string {
+  return typeof v === "string" && v.length > 0 && v.startsWith("/") && !v.includes("\0");
+}
+
 // [Top-level Permission]
 // 开始下载最新/指定版本的 runner 安装包
 router.post(
@@ -668,9 +677,8 @@ router.post(
         replace?: boolean;
         concurrency?: number;
       };
-      const dirs = (Array.isArray(body.dirs) ? body.dirs : [])
-        .map((d) => String(d))
-        .filter(Boolean);
+      // 只转发形状合法的目录：String(d) 会把对象变成 "[object Object]" 并通过 Boolean 过滤
+      const dirs = (Array.isArray(body.dirs) ? body.dirs : []).filter(isForwardableDir);
       const remoteService = RemoteServiceSubsystem.getInstance(daemonId);
 
       const results = await mapWithConcurrency(
@@ -751,7 +759,9 @@ router.post(
       }
       // 按目录过滤，不按单元名：单元名是 systemd 的实现细节，别的托管方式没有它却照样能启停。
       // 按 service 过滤会把那些项静默丢掉 —— 用户点了批量启动，既没反应也没有错误。
-      const items = (Array.isArray(body.items) ? body.items : []).filter((it) => it && it.dir);
+      const items = (Array.isArray(body.items) ? body.items : []).filter(
+        (it) => it && isForwardableDir(it.dir)
+      );
       const remoteService = RemoteServiceSubsystem.getInstance(daemonId);
 
       const results = await mapWithConcurrency(

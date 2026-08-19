@@ -506,11 +506,19 @@ async function doBatchEnv() {
     envBatchSaving.value = false;
   }
 }
-function promptBatchRestart(targets: RepoRunner[]) {
-  if (!targets.length) return;
+function promptBatchRestart(written: RepoRunner[]) {
+  // 写成功不等于重启得动：foreign / conflict / 观测不完整的那些，面板本来就不该去重启它们。
+  // 不筛的话，这里会绕过启停守卫，发一批前端自己都知道会被拒的请求。
+  const targets = written.filter((r) => canControl(r, "restart").ok);
+  const denied = written.length - targets.length;
+  if (!targets.length) {
+    if (denied > 0) message.warning(t("TXT_CODE_RUNNER_BATCH_NONE_CONTROLLABLE"));
+    return;
+  }
   const busyCount = targets.filter((r) => r.busy).length;
-  const lines = [`环境变量已写入，需重启单元才生效。将重启 ${targets.length} 个 runner。`];
+  const lines = [`环境变量已写入，需重启才生效。将重启 ${targets.length} 个 runner。`];
   if (busyCount > 0) lines.push(`其中 ${busyCount} 个正在跑 job，重启会当场中断这些 CI 任务！`);
+  if (denied > 0) lines.push(t("TXT_CODE_RUNNER_BATCH_SKIPPED", { count: denied }));
   Modal.confirm({
     title: "重启使环境变量生效？",
     icon: () => h(ExclamationCircleOutlined),
@@ -923,9 +931,7 @@ const goRepo = (slug: string) =>
     >
       <a-radio-group v-model:value="envBatchTarget" style="margin-bottom: 12px">
         <a-radio-button value="override">
-          {{
-            t("TXT_CODE_RUNNER_ENV_SCOPE_LISTENER")
-          }}
+          {{ t("TXT_CODE_RUNNER_ENV_SCOPE_LISTENER") }}
         </a-radio-button>
         <a-radio-button value="dotenv">运行时 .env</a-radio-button>
       </a-radio-group>

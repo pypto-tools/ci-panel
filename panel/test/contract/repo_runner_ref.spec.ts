@@ -34,6 +34,18 @@ const runtime = (over: Partial<RunnerRuntimeState> = {}): RunnerRuntimeState => 
 });
 
 describe("a payload from an upgraded node", () => {
+  it("takes the supervisor from the runtime when the top-level field is absent", () => {
+    // `supervisor` is optional in the protocol while the transition lasts. Defaulting straight
+    // to "none" would label a perfectly normal runner as externally supervised and disable
+    // every control on it.
+    const ref = toRunnerRef(
+      "node-1",
+      "NPU node",
+      scanned({ supervisor: undefined, runtime: runtime({ supervisor: "systemd" }) })
+    );
+    expect(ref.supervisor).toBe("systemd");
+  });
+
   it("takes online-ness straight from the runtime", () => {
     const ref = toRunnerRef(
       "node-1",
@@ -100,6 +112,14 @@ describe("a payload from a node that has not been upgraded", () => {
 
   it("is not running when there is no unit at all", () => {
     expect(legacyRunning(scanned({ runtime: undefined, systemd: null }))).toBe(false);
+  });
+
+  it("keeps the unit name so the panel can still control that node", () => {
+    // Those daemons address runners by unit name only; dropping it here would make every
+    // start/stop against a not-yet-upgraded node fail during the upgrade window.
+    expect(toRunnerRef("node-1", "old node", legacy).systemd?.service).toBe(
+      "actions.runner.org-repo.runner-1.service"
+    );
   });
 
   it("degrades to 'external' rather than inventing a supervisor", () => {

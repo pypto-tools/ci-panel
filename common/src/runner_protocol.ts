@@ -154,6 +154,12 @@ export interface RepoRunnerRef {
   group: string;
   markerId: string;
   broken?: string;
+  /**
+   * @deprecated 过渡期字段：还没升级的节点不回 runtime，单元名只能从这里拿，而启停请求在
+   * 过渡期要同时带上它（那种 daemon 只认单元名）。丢了它，升级窗口里对老节点的启停会带着
+   * 一个空单元名过去而全部失败。1.2 与其它兼容字段一起删。
+   */
+  systemd?: SystemdStateCompat | null;
 }
 
 // ---- 环境变量的两个作用域 ----

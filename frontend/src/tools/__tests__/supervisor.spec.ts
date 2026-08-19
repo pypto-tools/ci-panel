@@ -158,6 +158,24 @@ describe("what the row shows", () => {
     expect(ownershipHint(r)).toBe("unit entered failed");
   });
 
+  it("falls back to the legacy unit name when the node sent no runtime", () => {
+    // Not a nicety: an un-upgraded daemon only accepts a unit name, so losing it here would
+    // make every start/stop against those nodes fail with an empty service during the window
+    // where node and panel versions differ.
+    const legacy = subject({
+      runtime: null,
+      systemd: {
+        service: "actions.runner.org-repo.runner-1.service",
+        loaded: true,
+        activeState: "active",
+        subState: "running",
+        enabled: "enabled",
+        since: ""
+      }
+    });
+    expect(serviceOf(legacy)).toBe("actions.runner.org-repo.runner-1.service");
+  });
+
   it("reads the unit name out of raw, which is display-only", () => {
     const r = subject({
       runtime: { ...subject().runtime!, raw: { service: "actions.runner.x.service" } }

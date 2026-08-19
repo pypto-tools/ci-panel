@@ -16,7 +16,7 @@ import type {
 // 两处共用同一个判定函数，就不能挑其中一个具体类型当形参。
 export type RunnerControlSubject = Pick<
   ScannedRunner,
-  "dir" | "managed" | "supervisor" | "runtime"
+  "dir" | "managed" | "supervisor" | "runtime" | "systemd"
 >;
 
 export interface ControlCheck {
@@ -97,7 +97,10 @@ export function ownershipHint(r: RunnerControlSubject): string {
   return r.runtime?.detail || "";
 }
 
-// 单元名只有 systemd 后端有，且只供展示与过渡期的请求载荷。判断逻辑一律不许读它。
+// 单元名只有 systemd 托管才有，且只供展示与过渡期的请求载荷。判断逻辑一律不许读它。
+//
+// 回退到老字段是必需的，不是保险：还没升级的节点不回 runtime，而那种 daemon 只认单元名。
+// 少了这一层，升级窗口里对老节点的每次启停都会带着一个空单元名过去，然后整批失败。
 export function serviceOf(r: RunnerControlSubject): string {
-  return r.runtime?.raw?.service ?? "";
+  return r.runtime?.raw?.service ?? r.systemd?.service ?? "";
 }

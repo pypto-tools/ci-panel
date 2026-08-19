@@ -14,6 +14,8 @@ import { canonicalPath } from "../../tools/path_link_check";
 import { scanListenerProcs, type ListenerProc } from "./local_procs";
 import { backendFor } from "./registry";
 import { resolveSupervisor } from "./resolve";
+import type { RunnerSupervisor } from "./types";
+import type { SupervisorKind } from "mcsmanager-common";
 
 const RECONCILE_INTERVAL_MS = 15_000;
 
@@ -35,8 +37,10 @@ async function tick(): Promise<void> {
   // managedRunnerDirs 回的是句柄实例的 cwd，这里归一化后才能和 ListenerProc.dir 比对——
   // 不归一，软链节点上观测恒空、恒判 idle，而这是一条无人值守的写路径，每 15 秒静默放行一次。
   for (const dir of managedRunnerDirs().map(canonicalPath)) {
-    let kind;
-    let backend;
+    // 显式标注：不写类型的话这两个是 evolving any，下面那次 reconcileOne 的存在性检查与
+    // 非空断言就都成了摆设 —— 类型系统根本没在看这条路。
+    let kind: SupervisorKind;
+    let backend: RunnerSupervisor;
     try {
       kind = resolveSupervisor(dir, readMarker(dir));
       backend = backendFor(kind);
@@ -83,9 +87,14 @@ export function startReconcileLoop(): void {
     // 每一拍都在抢同一批锁。
     if (ticking) return;
     ticking = true;
-    void tick().finally(() => {
-      ticking = false;
-    });
+    // catch 不能省：tick 里 managedRunnerDirs() 与 canonicalPath 都在 try 之外，它们一抛就是
+    // 一个没人接的 rejection。.finally() 返回的还是个会 reject 的 promise，void 只是丢掉它。
+    // 这条循环 15 秒一拍且无人值守，持续失败会把日志刷满（Node 默认更会直接终止进程）。
+    void tick()
+      .catch((err: unknown) => logger.error(`[supervisor] reconcile tick 异常: ${errText(err)}`))
+      .finally(() => {
+        ticking = false;
+      });
   };
   run();
   timer = setInterval(run, RECONCILE_INTERVAL_MS);

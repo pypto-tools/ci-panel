@@ -37,21 +37,28 @@ describe("restart", () => {
     // back: the user asked for a restart and got a permanent stop.
     const deps = fakeDeps();
     deps.procs = [listenerProc({ dir: fixture.dir, pgid: PGID })];
-    const backend = createProcessSupervisor(deps);
 
+    // Sampled from inside deps.scan rather than from a timer: restart calls scan while the stop
+    // ladder is climbing and again while settling, i.e. squarely inside the window where a
+    // stop-then-start implementation would have desired == "stopped" on disk. A setInterval can
+    // lose the race outright — restart may finish first, leaving nothing sampled and the
+    // assertion below passing without ever having looked.
+    const seen: string[] = [];
     // The listener goes away as soon as it has been signalled.
     deps.scan = async () => {
+      const r = await readRuntime(fixture.markerId);
+      if (r) seen.push(r.desired);
       const now = deps.procs;
       deps.procs = [];
       return now;
     };
-    const seen: string[] = [];
-    const watch = setInterval(() => {
-      void readRuntime(fixture.markerId).then((r) => r && seen.push(r.desired));
-    }, 1);
-    await backend.restart(fixture.dir);
-    clearInterval(watch);
+    // Built only now: createProcessSupervisor spreads deps into its own object, so anything
+    // assigned onto this one afterwards is invisible to the backend. (procs still works because
+    // the default scan closes over deps — which is exactly what masked a dead scan override here.)
+    await createProcessSupervisor(deps).restart(fixture.dir);
 
+    // Prove the window was actually observed before asserting what was not seen in it.
+    expect(seen.length).toBeGreaterThan(0);
     expect(seen).not.toContain("stopped");
     expect((await readRuntime(fixture.markerId))?.desired).toBe("running");
   });

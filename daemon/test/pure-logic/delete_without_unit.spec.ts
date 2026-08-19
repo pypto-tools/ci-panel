@@ -1,6 +1,7 @@
+import { randomUUID } from "crypto";
 import fs from "fs-extra";
 import path from "path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { deleteRunner } from "../../src/service/runner_scan";
 import { createProcessSupervisor } from "../../src/service/supervisor/process";
 import { removeRuntime, writeRuntime } from "../../src/service/supervisor/process/store";
@@ -19,7 +20,9 @@ describe("deleting a runner that was never handed to systemd", () => {
   let fixture: ReturnType<typeof makeRunner>;
 
   beforeEach(() => {
-    fixture = makeRunner(`delete-no-unit-${Math.floor(process.hrtime()[1] % 100000)}`);
+    // randomUUID, not hrtime()[1]: that field is nanoseconds-within-the-second, and vitest runs
+    // spec files in parallel workers under one scan root — two files can land on the same name.
+    fixture = makeRunner(`delete-no-unit-${randomUUID().slice(0, 8)}`);
   });
 
   it("removes the directory instead of stopping at the first step", async () => {
@@ -43,10 +46,18 @@ describe("deleting a runner that was never handed to systemd", () => {
 });
 
 describe("the fail-closed half is unchanged", () => {
+  let fixture: ReturnType<typeof makeRunner>;
+
+  // In afterEach rather than at the end of each test body: a failing expect above would skip the
+  // cleanup and leak the directory into the next run, where makeRunner would reuse it.
+  afterEach(async () => {
+    if (fixture) await fs.remove(fixture.dir);
+  });
+
   // deleteRunner reaches the real /proc, so the "a listener is alive" case is proven one level
   // down, on the backend call the delete path makes.
   it("refuses to detach while a listener is running in that directory", async () => {
-    const fixture = makeRunner("delete-live-listener");
+    fixture = makeRunner("delete-live-listener");
     await removeRuntime(fixture.markerId);
     const deps = fakeDeps();
     deps.procs = [listenerProc({ dir: fixture.dir, pgid: 31245 })];
@@ -60,11 +71,10 @@ describe("the fail-closed half is unchanged", () => {
     // _work and _diag out from under a live process.
     expect(r.ok).toBe(false);
     expect(r.hint).toBeTruthy();
-    await fs.remove(fixture.dir);
   });
 
   it("refuses when the live listener is not the process group we recorded", async () => {
-    const fixture = makeRunner("delete-stale-pgid");
+    fixture = makeRunner("delete-stale-pgid");
     await writeRuntime(fixture.markerId, {
       v: 1,
       dir: fixture.dir,
@@ -85,6 +95,5 @@ describe("the fail-closed half is unchanged", () => {
     const r = await createProcessSupervisor(deps).detach(fixture.dir);
     expect(r.ok).toBe(false);
     expect(r.hint).toBeTruthy();
-    await fs.remove(fixture.dir);
   });
 });

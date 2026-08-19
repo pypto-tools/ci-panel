@@ -18,12 +18,10 @@ const walk = (dir: string): string[] =>
     return e.isFile() && e.name.endsWith(".ts") ? [full] : [];
   });
 
-// Only literal keys can be checked; a computed key is invisible here either way.
-const CALL = /\$t\(\s*"(TXT_CODE_[A-Za-z0-9_.]+)"/g;
-
-// Inherited from upstream MCSManager, missing before this fork existed. Listed rather than
-// counted so the edit is a reviewable declaration; delete a line once the key is added.
-const KNOWN_MISSING = ["TXT_CODE_app.forcedShutdown"];
+// Only literal keys can be checked; a computed key is invisible here either way. Both quote
+// styles are matched: prettier writes double quotes here, but a single-quoted key is still valid
+// TypeScript, and a gate that only sees one of the two can be walked straight past.
+const CALL = /\$t\(\s*(["'])(TXT_CODE_[A-Za-z0-9_.]+)\1/g;
 
 describe("every key the daemon asks for exists in the source catalogue", () => {
   const catalogue = JSON.parse(
@@ -34,7 +32,7 @@ describe("every key the daemon asks for exists in the source catalogue", () => {
   for (const file of walk(path.join(DAEMON_ROOT, "src"))) {
     const text = fs.readFileSync(file, "utf8");
     for (const m of text.matchAll(CALL))
-      if (!used.has(m[1])) used.set(m[1], path.relative(DAEMON_ROOT, file));
+      if (!used.has(m[2])) used.set(m[2], path.relative(DAEMON_ROOT, file));
   }
 
   it("finds the call sites at all", () => {
@@ -44,13 +42,8 @@ describe("every key the daemon asks for exists in the source catalogue", () => {
 
   it("has a catalogue entry for each", () => {
     const missing = [...used]
-      .filter(([key]) => !(key in catalogue) && !KNOWN_MISSING.includes(key))
+      .filter(([key]) => !(key in catalogue))
       .map(([key, file]) => `${key} (${file})`);
     expect(missing).toEqual([]);
-  });
-
-  it("keeps the known-missing list honest", () => {
-    // A key that got added to the catalogue should leave this list, or it hides a future miss.
-    for (const key of KNOWN_MISSING) expect(catalogue[key], key).toBeUndefined();
   });
 });

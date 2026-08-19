@@ -22,7 +22,7 @@ const flush = () => new Promise((r) => setTimeout(r, 5));
 
 describe("a spawn that never produced a process", () => {
   it("throws instead of reporting success", async () => {
-    const deps = fakeDeps({ spawn: (() => fakeChild(undefined)) as never });
+    const deps = fakeDeps({ spawn: () => fakeChild(undefined) });
     await expect(createProcessSupervisor(deps).spawnOnce(fixture.dir)).rejects.toThrow();
   });
 
@@ -30,7 +30,7 @@ describe("a spawn that never produced a process", () => {
     // 'error' and the missing-pid fallback both fire when the command does not exist. Counting
     // both moves the whole backoff curve one step along on every attempt.
     const child = fakeChild(undefined);
-    const deps = fakeDeps({ spawn: (() => child) as never });
+    const deps = fakeDeps({ spawn: () => child });
     await createProcessSupervisor(deps)
       .spawnOnce(fixture.dir)
       .catch(() => undefined);
@@ -41,7 +41,7 @@ describe("a spawn that never produced a process", () => {
 
   it("records why, so the panel can show it", async () => {
     const child = fakeChild(undefined);
-    const deps = fakeDeps({ spawn: (() => child) as never });
+    const deps = fakeDeps({ spawn: () => child });
     await createProcessSupervisor(deps)
       .spawnOnce(fixture.dir)
       .catch(() => undefined);
@@ -61,7 +61,7 @@ describe("a run.sh that exits on its own", () => {
     // --once, its own "exit 0, no retry" branch). Judging by exit code alone leaves failures at
     // zero, so the backoff never engages and the tick respawns forever with an empty detail.
     const child = fakeChild(4242);
-    const deps = fakeDeps({ spawn: (() => child) as never });
+    const deps = fakeDeps({ spawn: () => child });
     await createProcessSupervisor(deps).spawnOnce(fixture.dir);
     child.emit("exit", 0, null);
     await flush();
@@ -72,7 +72,7 @@ describe("a run.sh that exits on its own", () => {
 
   it("does not count an exit after a long healthy run", async () => {
     const child = fakeChild(4242);
-    const deps = fakeDeps({ spawn: (() => child) as never });
+    const deps = fakeDeps({ spawn: () => child });
     await createProcessSupervisor(deps).spawnOnce(fixture.dir);
     deps.advance(10 * 60_000);
     child.emit("exit", 0, null);
@@ -82,7 +82,7 @@ describe("a run.sh that exits on its own", () => {
 
   it("does not count an exit the user asked for", async () => {
     const child = fakeChild(4242);
-    const deps = fakeDeps({ spawn: (() => child) as never });
+    const deps = fakeDeps({ spawn: () => child });
     const backend = createProcessSupervisor(deps);
     await backend.spawnOnce(fixture.dir);
     deps.procs = [listenerProc({ dir: fixture.dir, pgid: 4242 })];
@@ -98,11 +98,42 @@ describe("a run.sh that exits on its own", () => {
     // tracked by process group. Clearing the pgid here would turn a live listener into "foreign"
     // and lock the user out of stopping it.
     const child = fakeChild(4242);
-    const deps = fakeDeps({ spawn: (() => child) as never });
+    const deps = fakeDeps({ spawn: () => child });
     await createProcessSupervisor(deps).spawnOnce(fixture.dir);
     child.emit("exit", 1, null);
     await flush();
     expect((await readRuntime(fixture.markerId))?.pgid).toBe(4242);
+  });
+});
+
+describe("a spawn that throws synchronously", () => {
+  it("still records the failure, so the backoff engages", async () => {
+    // Most spawn failures surface as an 'error' event, but some throw on the spot (EACCES on the
+    // resolved binary, an option Node rejects outright). If that path skips recordFailure,
+    // failures stays at 0 for a runner that never started, backoffFor(0) returns 0, and the
+    // reconcile tick respawns every 15 seconds — rotating a run log on each pass.
+    const deps = fakeDeps({
+      spawn: () => {
+        throw new Error("EACCES: permission denied");
+      }
+    });
+    await createProcessSupervisor(deps)
+      .spawnOnce(fixture.dir)
+      .catch(() => undefined);
+    const rt = await readRuntime(fixture.markerId);
+    expect(rt?.failures).toBe(1);
+    expect(rt?.lastError).toContain("EACCES");
+    // A process that never existed owns no group; leaving a stale pgid would read as "running".
+    expect(rt?.pgid).toBe(0);
+  });
+
+  it("propagates the original error rather than swallowing it", async () => {
+    const deps = fakeDeps({
+      spawn: () => {
+        throw new Error("EACCES: permission denied");
+      }
+    });
+    await expect(createProcessSupervisor(deps).spawnOnce(fixture.dir)).rejects.toThrow(/EACCES/);
   });
 });
 
@@ -136,7 +167,7 @@ describe("intent is written before the process is launched", () => {
     // returns immediately, and the backoff retry never reaches this runner even though the user
     // pressed start.
     const child = fakeChild(undefined);
-    const deps = fakeDeps({ spawn: (() => child) as never });
+    const deps = fakeDeps({ spawn: () => child });
     await createProcessSupervisor(deps)
       .spawnOnce(fixture.dir)
       .catch(() => undefined);

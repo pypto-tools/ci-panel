@@ -21,6 +21,7 @@ import { assertUnderRoots } from "./runner_scan";
 import { readMarker } from "./runner_marker";
 import { backendFor } from "./supervisor/registry";
 import { resolveSupervisor } from "./supervisor/resolve";
+import type { RunnerSupervisor, SupervisorTarget } from "./supervisor/types";
 import { dirKey, withRunnerLock } from "./runner_lock";
 import {
   dotenvPath,
@@ -103,16 +104,24 @@ function parseDotEnv(text: string): RunnerEnvVar[] {
  * 因为后端的 readListenerEnv 返回 Promise（容器后端要 docker inspect、远端要一次 RPC），
  * 本函数跟着变成 async；三个后端的实现体照样是同步文件读，包一层的成本是零。
  */
-export async function readRunnerEnv(dirRaw: string): Promise<RunnerEnvResult> {
+export async function readRunnerEnv(
+  dirRaw: string,
+  resolved?: { backend: RunnerSupervisor; target?: SupervisorTarget }
+): Promise<RunnerEnvResult> {
   const dir = normalizeRunnerDir(dirRaw);
-  const backend = backendOf(dir);
+  // 调用方已经解析过就复用它那一份，别再解析一次。写入路径必须走这条：它锁的是第一次解析出来
+  // 的单元名，而 .service 是 runner 属主自己能改写的文件 —— 第二次解析可能读到另一个单元，
+  // 于是 merge 的打底值来自 A 单元、写入落到 B 单元（锁只保护了 B），A 那边的既有变量被当成
+  // 「本来就没有」而整份抹掉。这正是 prepare() 存在的理由。
+  const backend = resolved?.backend ?? backendOf(dir);
+  const target = resolved ? resolved.target : backend.prepare?.(dir);
   return {
     dir,
     supervisor: backend.kind,
     canWriteListenerEnv: backend.kind !== "none",
     hasSystemd: backend.kind === "systemd", // @deprecated，1.2 移除，届时只留 canWriteListenerEnv
     // 线上字段名不改（见文件头）：override 装的就是 listener 作用域那一节
-    override: await backend.readListenerEnv(dir, backend.prepare?.(dir)),
+    override: await backend.readListenerEnv(dir, target),
     dotenv: readSection(dotenvPath(dir), parseDotEnv)
   };
 }
@@ -151,7 +160,7 @@ export async function writeRunnerEnv(
   const keys = [dirKey(dir)];
   if (scope === "listener") keys.push(...(target?.lockKeys ?? []));
   return withRunnerLock(keys, "env", async () => {
-    const current = await readRunnerEnv(dir);
+    const current = await readRunnerEnv(dir, { backend, target });
     const section = scope === "listener" ? current.override : current.dotenv;
     // merge 以当前值打底，读不出来就不能写：否则会把既有变量当成「没有」而整份抹掉。
     // replace 是整表覆盖、不依赖当前值，读失败不影响。
@@ -160,6 +169,6 @@ export async function writeRunnerEnv(
     const desired = resolveDesired(section.vars, patch || {});
     if (scope === "listener") await backend.writeListenerEnv(dir, desired, target);
     else writeDotEnvFile(dir, desired);
-    return readRunnerEnv(dir);
+    return readRunnerEnv(dir, { backend, target });
   });
 }

@@ -476,7 +476,16 @@ export function registerRunners(
       if (!hasMarker(dir)) assertUnderRoots(dir);
       if (!fs.existsSync(path.join(dir, ".runner")))
         throw new Error("不是 runner 目录（缺 .runner）");
-      const marker = writeMarker(dir, { source, repo: it.repo, group: it.group });
+      // 意图与置备那条路一样要落盘：不落的话，每次扫描都从节点能力现推，而特权助手哪天坏了
+      // 推断结果就会翻成另一个后端 —— daemon 会在一个还活着的单元旁边再拉起一个 listener。
+      // 用 resolveSupervisor(dir, null) 而不是节点默认：装过单元的目录要认 systemd，
+      // 这条推断只在此刻做一次，之后认 marker 里记下的那个。
+      const marker = writeMarker(dir, {
+        source,
+        repo: it.repo,
+        group: it.group,
+        supervisor: resolveSupervisor(dir, null)
+      });
       // 从 .runner 读 agentName / repo，作句柄实例的昵称与分组标签。
       // repo 以 .runner 为准、调用方传的只作兜底：面板拿这个返回值去纳管仓库，而
       // 之后 managed_list 归堆用的也是 .runner 里的 slug（见 buildRunners）。两边同源
@@ -717,7 +726,13 @@ async function runDelete(
   //    但「没托管过」不等于「没东西在跑」：各后端的 detach 内部都先向 /proc 复核过活体，
   //    少了那道复核，下面这条 fail closed 就形同虚设。
   const label = $t("TXT_CODE_RUNNER_DELETE_STEP_SUPERVISOR");
-  const detached = await backend.detach(dir, target);
+  // detach 的契约是回 { ok, error, hint }，但它内部会碰助手与 /proc，两者都可能抛（助手起不来、
+  // hidepid 下读不动）。让异常穿出去的话，整条删除以一个裸错误 reject：前端拿不到 steps、
+  // 拿不到 hint，看到的又是那个「卡在第一步、什么也没说」的老样子 —— 正是这次要消灭的形状。
+  // 抛出来一律按「没能收回托管」处理，后续步骤照旧跳过（fail closed 不变）。
+  const detached = await backend
+    .detach(dir, target)
+    .catch((err: unknown) => ({ ok: false, error: errText(err), hint: undefined }));
   steps.push(
     detached.ok
       ? { key: "systemd", label, status: "ok" }
@@ -738,15 +753,15 @@ async function runDelete(
   // 里有一个 busy 前端就会带上它，拿它给这里开口子等于在最该拦的场景下失效。
   if (!detached.ok) {
     for (const [key, stepLabel] of [
-      ["github", "从 GitHub 注销"],
-      ["panel", "清理面板句柄实例与纳管标记"],
-      ["dir", "删除 runner 目录"]
+      ["github", $t("TXT_CODE_RUNNER_DELETE_STEP_GITHUB")],
+      ["panel", $t("TXT_CODE_RUNNER_DELETE_STEP_PANEL")],
+      ["dir", $t("TXT_CODE_RUNNER_DELETE_STEP_DIR")]
     ] as const)
       steps.push({
         key,
         label: stepLabel,
         status: "skipped",
-        detail: "runner 没能停下来，后续步骤全部跳过，避免删掉一个还在运行的 runner",
+        detail: $t("TXT_CODE_RUNNER_DELETE_SKIPPED_NOT_STOPPED"),
         hint: detached.hint || detachHint(backend.kind)
       });
     const warnings = steps.filter((s) => s.status !== "ok").map((s) => `${s.label}：${s.detail}`);
@@ -759,10 +774,10 @@ async function runDelete(
     const r = await removeGithubRegistration(dir, opts.removeToken, opts.proxy);
     steps.push(
       r.ok
-        ? { key: "github", label: "从 GitHub 注销", status: "ok" }
+        ? { key: "github", label: $t("TXT_CODE_RUNNER_DELETE_STEP_GITHUB"), status: "ok" }
         : {
             key: "github",
-            label: "从 GitHub 注销",
+            label: $t("TXT_CODE_RUNNER_DELETE_STEP_GITHUB"),
             status: "failed",
             detail: r.error,
             hint: `在 runner 目录执行：cd ${dir} && ./config.sh remove --token <删除token>；或到 GitHub 仓库 Settings → Actions → Runners 手动移除`
@@ -771,7 +786,7 @@ async function runDelete(
   } else {
     steps.push({
       key: "github",
-      label: "从 GitHub 注销",
+      label: $t("TXT_CODE_RUNNER_DELETE_STEP_GITHUB"),
       status: "skipped",
       detail: "未取得删除 token（该仓库可能没配 PAT）",
       hint: "到 GitHub 仓库 Settings → Actions → Runners 手动移除该 runner"
@@ -790,11 +805,11 @@ async function runDelete(
       }
     }
     removeMarker(dir);
-    steps.push({ key: "panel", label: "清理面板句柄实例与纳管标记", status: "ok" });
+    steps.push({ key: "panel", label: $t("TXT_CODE_RUNNER_DELETE_STEP_PANEL"), status: "ok" });
   } catch (err: any) {
     steps.push({
       key: "panel",
-      label: "清理面板句柄实例与纳管标记",
+      label: $t("TXT_CODE_RUNNER_DELETE_STEP_PANEL"),
       status: "failed",
       detail: err?.message || String(err)
     });
@@ -805,11 +820,11 @@ async function runDelete(
   try {
     await fs.remove(dir);
     dirRemoved = true;
-    steps.push({ key: "dir", label: "删除 runner 目录", status: "ok" });
+    steps.push({ key: "dir", label: $t("TXT_CODE_RUNNER_DELETE_STEP_DIR"), status: "ok" });
   } catch (err: any) {
     steps.push({
       key: "dir",
-      label: "删除 runner 目录",
+      label: $t("TXT_CODE_RUNNER_DELETE_STEP_DIR"),
       status: "failed",
       detail: err?.message || String(err),
       hint: `rm -rf ${dir}`

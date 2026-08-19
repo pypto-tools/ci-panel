@@ -58,7 +58,11 @@ describe("every path derived from the marker id is shape-checked", () => {
 
   it("does not create anything while validating", () => {
     // A path helper that mkdir'd on the way would turn a rejected id into a side effect.
+    // The helpers have to actually be called with a traversing id: asserting the absence alone
+    // passes against any implementation, including one that never validates at all.
     const dataDir = path.join(process.cwd(), "data", "RunnerRuntime", "..", "evil");
+    for (const fn of [runtimePath, listenerEnvPath, runLogPath])
+      for (const bad of ["../evil/x", "../../evil/x"]) expect(() => fn(bad)).toThrow();
     expect(fs.existsSync(dataDir)).toBe(false);
   });
 });

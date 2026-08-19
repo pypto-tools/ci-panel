@@ -46,7 +46,13 @@ describe("adoption is recorded before anything can fail", () => {
   it("records the supervision intent at that moment", () => {
     // Deciding it later, from node capability, would let a broken privileged helper flip an
     // existing runner to another backend and start a second listener beside the running unit.
-    expect(body).toMatch(/writeMarker\([\s\S]{0,400}supervisor: nodeDefaultSupervisor\(\)/);
+    //
+    // resolveSupervisor(dir, null), the same spelling the two adoption paths use: a re-provision
+    // of a directory that already carries a .service must resolve to systemd even while the
+    // helper is down, which node capability alone would get wrong and pin permanently.
+    expect(body).toMatch(
+      /writeMarker\([\s\S]{0,700}supervisor: resolveSupervisor\(targetDir, null\)/
+    );
   });
 });
 

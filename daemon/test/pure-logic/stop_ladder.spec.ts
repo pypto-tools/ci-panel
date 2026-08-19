@@ -79,13 +79,13 @@ describe("the three rungs", () => {
     await createProcessSupervisor(deps).stop(fixture.dir, 0);
     expect((await readRuntime(fixture.markerId))?.stopStage).toBe(1);
 
-    const afterRestart = createProcessSupervisor(fakeDeps());
+    // A second supervisor over fresh deps stands in for the restarted daemon: it shares nothing
+    // with the one above except the on-disk stage, which is the whole point.
     const deps2 = fakeDeps();
     deps2.procs = deps.procs;
     deps2.advance(31_000);
     await createProcessSupervisor(deps2).reconcileOne!(fixture.dir, deps2.procs);
     expect(deps2.signals.map((s) => s.signal)).toEqual(["SIGTERM"]);
-    expect(afterRestart.kind).toBe("process");
   });
 });
 

@@ -9,7 +9,7 @@
 //   attach / start → desired = "running"、清停止阶梯
 //   stop           → desired = "stopped"、记 stopRequestedAt
 //   reconcile      → 推进停止阶梯；或在 desired 仍是 "running" 且没有活体时按退避重拉
-import { spawn as nodeSpawn, type ChildProcess } from "child_process";
+import { spawn as nodeSpawn, type SpawnOptions } from "child_process";
 import fs from "fs-extra";
 
 import { $t } from "../../../i18n";
@@ -137,11 +137,31 @@ export function backoffFor(failures: number): number {
 
 // 可注入的外部依赖。停止阶梯跨越 5 分钟、启动要等 8 秒，不注入就只能用真实时钟测，
 // 而这几条恰恰是最需要用例盯住的（发错信号不可逆）。
+/**
+ * 后端真正用到的那点 ChildProcess 表面。收窄到这里而不是用 ChildProcess 本身，是为了让测试
+ * 替身**结构化**满足它：替身实现不了完整的 ChildProcess（stdin/stdout/kill/send…），只能靠
+ * 一次 as 断言塞进去，而断言一加，日后改了这里的签名替身照样编译得过 —— 契约就不再有人守。
+ */
+export interface SpawnedChild {
+  readonly pid?: number;
+  on(event: "error", listener: (err: Error) => void): void;
+  on(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): void;
+  unref(): void;
+}
+
+// 同理只收窄成后端唯一用到的那个调用形状：typeof nodeSpawn 是一整组重载，替身同样只能靠断言
+// 去匹配。真正的 child_process.spawn 仍然可以直接赋给它。
+export type SpawnFn = (
+  command: string,
+  args: readonly string[],
+  options: SpawnOptions
+) => SpawnedChild;
+
 export interface ProcessDeps {
   scan: () => Promise<ListenerProc[]>;
   kill: (pid: number, signal: NodeJS.Signals) => void;
   now: () => number;
-  spawn: typeof nodeSpawn;
+  spawn: SpawnFn;
   settlePollMs: number;
   // 面板点一次按钮的等待窗口。restart 内部那次 stop 用的也是它，所以它必须可注入 ——
   // 否则那条路只能用真实的 8 秒去测。
@@ -282,13 +302,22 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
 
     const logFd = await rotateAndOpenRunLog(markerId);
     try {
-      const child: ChildProcess = deps.spawn(argv[0], argv.slice(1), {
-        cwd: key,
-        env: { ...listenerBaseEnv(), ...listenerEnvFor(markerId) },
-        detached: true, // 新进程组（pgid == child.pid），且活过 daemon 重启
-        stdio: ["ignore", logFd, logFd],
-        shell: false // argv 数组传参，不起 shell —— 逃生口的值也走这条路
-      });
+      let child: SpawnedChild;
+      try {
+        child = deps.spawn(argv[0], argv.slice(1), {
+          cwd: key,
+          env: { ...listenerBaseEnv(), ...listenerEnvFor(markerId) },
+          detached: true, // 新进程组（pgid == child.pid），且活过 daemon 重启
+          stdio: ["ignore", logFd, logFd],
+          shell: false // argv 数组传参，不起 shell —— 逃生口的值也走这条路
+        });
+      } catch (err: unknown) {
+        // spawn 多数失败走 'error' 事件，但非法选项这类会当场抛。不在这里记一次失败的话，
+        // failures 停在 0、backoffFor(0) 回 0，reconcile 每拍重试一次并轮转一份日志。
+        // 记账自己失败不能盖掉原始错误：调用方要看到的是 spawn 为什么没起来。
+        await recordFailure(markerId, err, true).catch(() => undefined);
+        throw err;
+      }
 
       // spawn 失败在 Node 里**不抛**：命令不存在时它照样返回一个 ChildProcess，child.pid 是
       // undefined，错误在下一个 tick 以 'error' 事件出现；没有监听器时会变成 uncaughtException，

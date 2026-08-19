@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createProcessSupervisor } from "../../src/service/supervisor/process";
 import { removeRuntime, writeListenerEnvFile } from "../../src/service/supervisor/process/store";
 import { fakeDeps, makeRunner } from "../helpers/process_fixture";
@@ -14,17 +14,36 @@ import { fakeDeps, makeRunner } from "../helpers/process_fixture";
 
 const fixture = makeRunner("env-isolation");
 
+// Restored after every test: vitest shares one process per worker, so leaving the synthetic PAT
+// and proxy behind would hand them to whichever spec runs next and make that spec order-dependent.
+const INJECTED = ["CIP_GITHUB_TOKEN", "CIP_RUNNER_PROXY", "CIP_SOMETHING_NEW"] as const;
+const saved = new Map<string, string | undefined>();
+
 beforeEach(async () => {
   await removeRuntime(fixture.markerId);
+  for (const k of INJECTED) saved.set(k, process.env[k]);
   process.env.CIP_GITHUB_TOKEN = "ghp_this_must_not_leak";
   process.env.CIP_RUNNER_PROXY = "http://user:secret@127.0.0.1:7890";
   process.env.CIP_SOMETHING_NEW = "future variable nobody thought about";
 });
 
-const spawnEnv = async (): Promise<Record<string, string>> => {
+afterEach(() => {
+  for (const k of INJECTED) {
+    const prev = saved.get(k);
+    if (prev === undefined) delete process.env[k];
+    else process.env[k] = prev;
+  }
+});
+
+const spawnEnv = async (): Promise<NodeJS.ProcessEnv> => {
   const deps = fakeDeps();
   await createProcessSupervisor(deps).spawnOnce(fixture.dir);
-  return deps.spawns[0].opts.env;
+  const env = deps.spawns[0].opts.env;
+  // Asserted, not coerced: spawning with no env at all makes the child inherit the daemon's whole
+  // environment — precisely the leak this file exists to prevent. Defaulting to {} here would turn
+  // that failure into a passing test.
+  expect(env).toBeDefined();
+  return env as NodeJS.ProcessEnv;
 };
 
 describe("the listener's environment", () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { backoffFor, resolveStartArgv } from "../../src/service/supervisor/process";
 
 // CIP_RUNNER_START is an escape hatch read only from the daemon's own environment — never from
@@ -9,6 +9,18 @@ import { backoffFor, resolveStartArgv } from "../../src/service/supervisor/proce
 // optional knob is worse than running the default and saying so loudly.
 
 describe("resolveStartArgv", () => {
+  // The parameter defaults to process.env.CIP_RUNNER_START, so passing undefined reads whatever
+  // the test runner inherited. Pinned here, or this suite fails on a node that happens to use the
+  // escape hatch.
+  const saved = process.env.CIP_RUNNER_START;
+  beforeEach(() => {
+    delete process.env.CIP_RUNNER_START;
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.CIP_RUNNER_START;
+    else process.env.CIP_RUNNER_START = saved;
+  });
+
   it("defaults to the runner's own launcher", () => {
     expect(resolveStartArgv(undefined).argv).toEqual(["./run.sh"]);
     expect(resolveStartArgv("").argv).toEqual(["./run.sh"]);

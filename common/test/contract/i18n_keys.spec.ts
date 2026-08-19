@@ -69,7 +69,11 @@ describe("the catalogues are well-formed", () => {
 
   it("has no empty keys or values in the source", () => {
     expect(Object.keys(source).filter((k) => !k.trim())).toEqual([]);
-    expect(Object.entries(source).filter(([, v]) => !v.trim()).map(([k]) => k)).toEqual([]);
+    expect(
+      Object.entries(source)
+        .filter(([, v]) => !v.trim())
+        .map(([k]) => k)
+    ).toEqual([]);
   });
 });
 
@@ -141,7 +145,20 @@ describe("completeness", () => {
       "TXT_CODE_RUNNER_SERVICE_NAME_INVALID",
       "TXT_CODE_RUNNER_SUPERVISOR_NONE",
       "TXT_CODE_RUNNER_SUPERVISOR_UNKNOWN",
-      "TXT_CODE_RUNNER_TARGET_REQUIRED"
+      "TXT_CODE_RUNNER_TARGET_REQUIRED",
+      // The supervisor work localised the remaining delete/provision step labels, which had been
+      // raw Chinese in the payload next to already-localised siblings. New source keys start out
+      // untranslated in these ten, same as every ci-panel key above.
+      "TXT_CODE_RUNNER_DELETE_STEP_GITHUB",
+      "TXT_CODE_RUNNER_DELETE_STEP_PANEL",
+      "TXT_CODE_RUNNER_DELETE_STEP_DIR",
+      "TXT_CODE_RUNNER_DELETE_SKIPPED_NOT_STOPPED",
+      "TXT_CODE_RUNNER_PROVISION_STEP_ENV_WRITE",
+      "TXT_CODE_RUNNER_PROVISION_STEP_ENV_RESTART",
+      // Inherited from upstream MCSManager: the daemon has always called $t() for this on the
+      // forced-shutdown path, but no catalogue ever defined it, so it reached the log as the
+      // literal key. Defined in en_US/zh_CN now; the ten translations start from here.
+      "TXT_CODE_app.forcedShutdown"
     ].sort();
 
     const gaps = new Map<string, string[]>();
@@ -156,9 +173,7 @@ describe("completeness", () => {
     for (const [file, missing] of gaps) {
       expect(missing, file).toEqual(KNOWN_UNTRANSLATED);
     }
-    expect([...gaps.keys()].sort()).toEqual(
-      others.filter((f) => f !== "zh_CN.json").sort()
-    );
+    expect([...gaps.keys()].sort()).toEqual(others.filter((f) => f !== "zh_CN.json").sort());
   });
 });
 

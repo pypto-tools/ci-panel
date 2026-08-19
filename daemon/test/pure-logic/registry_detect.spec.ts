@@ -22,7 +22,7 @@ describe("the registry covers the protocol", () => {
   it("registers every SupervisorKind", () => {
     // This object is exhaustive by type, so adding a member to the union reddens it here too —
     // deliberately, because the person adding a backend should see both halves at once.
-    const EVERY_KIND: Record<SupervisorKind, true> = { systemd: true, none: true };
+    const EVERY_KIND: Record<SupervisorKind, true> = { systemd: true, process: true, none: true };
     expect(registeredKinds().sort()).toEqual(Object.keys(EVERY_KIND).sort());
   });
 
@@ -40,9 +40,11 @@ describe("choosing the node default", () => {
   // The suite pins CIP_RUNNER_SVC_HELPER at a path that does not exist (see test/setup.ts), so
   // the privileged helper preflight fails and the systemd backend reports itself unavailable —
   // which is exactly the container-node shape this framework exists for.
-  it("falls back to the always-available backend when the others are out", () => {
+  it("picks the highest-priority backend that is actually available", () => {
     expect(nodeCapabilities().find((c) => c.kind === "systemd")?.available).toBe(false);
-    expect(nodeDefaultSupervisor()).toBe("none");
+    // The process backend is next in priority and always available: if the daemon runs, it can
+    // fork. This is the answer for a node with no systemd and no privileged helper.
+    expect(nodeDefaultSupervisor()).toBe("process");
   });
 
   it("ignores CIP_RUNNER_SUPERVISOR when that backend is not available here", () => {
@@ -50,13 +52,21 @@ describe("choosing the node default", () => {
     // log beats a node that accepts every request and fails each one.
     process.env.CIP_RUNNER_SUPERVISOR = "systemd";
     __resetNodeCapabilitiesForTest();
+    expect(nodeDefaultSupervisor()).toBe("process");
+  });
+
+  it("honours CIP_RUNNER_SUPERVISOR when that backend is available", () => {
+    // The case that matters in the other direction: a systemd node deliberately switched to
+    // process supervision, or a node told not to supervise at all.
+    process.env.CIP_RUNNER_SUPERVISOR = "none";
+    __resetNodeCapabilitiesForTest();
     expect(nodeDefaultSupervisor()).toBe("none");
   });
 
   it("ignores a value that is not a registered kind", () => {
     process.env.CIP_RUNNER_SUPERVISOR = "docker";
     __resetNodeCapabilitiesForTest();
-    expect(nodeDefaultSupervisor()).toBe("none");
+    expect(nodeDefaultSupervisor()).toBe("process");
   });
 
   it("marks exactly one kind as the default", () => {

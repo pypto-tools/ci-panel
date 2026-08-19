@@ -1375,5 +1375,8 @@
   "TXT_CODE_RUNNER_DIR_IS_ROOT": "runner 目录不能是 /。",
   "TXT_CODE_RUNNER_SERVICE_NAME_INVALID": "非法的服务名：{{service}}。",
   "TXT_CODE_RUNNER_DETACH_HINT_SYSTEMD": "请在节点上用特权助手停止并卸载该 runner 的 systemd 单元后重试。",
-  "TXT_CODE_RUNNER_DETACH_HINT_NONE": "请到起它的地方把该 runner 进程停掉后重试。"
+  "TXT_CODE_RUNNER_DETACH_HINT_NONE": "请到起它的地方把该 runner 进程停掉后重试。",
+  "TXT_CODE_RUNNER_SPAWN_FAILED": "{{dir}} 里的 runner 进程没能启动，原因见节点日志。",
+  "TXT_CODE_RUNNER_STOP_NOT_SETTLED": "{{dir}} 里的 runner 在期限内没有停下来。",
+  "TXT_CODE_RUNNER_DETACH_HINT_PROCESS": "请在节点上停掉该 runner 的进程组（kill -INT -<pgid>）后重试。"
 }

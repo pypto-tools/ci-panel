@@ -9,6 +9,7 @@ import type { SupervisorKind } from "mcsmanager-common";
 // 表驱动：新增一种托管方式时这张 Record 会编译失败，提醒补一条指引
 const DETACH_HINT: Record<SupervisorKind, string> = {
   systemd: "TXT_CODE_RUNNER_DETACH_HINT_SYSTEMD",
+  process: "TXT_CODE_RUNNER_DETACH_HINT_PROCESS",
   none: "TXT_CODE_RUNNER_DETACH_HINT_NONE"
 };
 

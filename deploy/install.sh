@@ -423,6 +423,17 @@ write_env() {
 # 拉 runner 安装包和跑 config.sh 注册都要连 GitHub。前端表单没填代理时用这个兜底。
 # CIP_RUNNER_PROXY=http://127.0.0.1:7890
 
+# runner 的托管方式。不设 = 自动探测(有 systemd + 特权助手 → systemd，否则 → process)。
+# 只影响此后新建的 runner：已有 runner 认自己 .cipanel 里记的那个。填了但该后端在本节点
+# 不可用时会被忽略并退回自动探测，daemon 启动日志里能看到原因。改完要重启 daemon。
+# CIP_RUNNER_SUPERVISOR=process
+
+# process 托管拉起 runner 的命令，JSON 字符串数组。默认 ["./run.sh"]。
+# 非法 JSON 或非字符串数组会回退默认并告警，不会让 daemon 起不来。
+# 硬约束：必须原地 exec，不能把进程送到别的容器或主机(否则记录的进程组对不上，
+# 面板会把它判成「不受托管」并拒绝启停)。
+# CIP_RUNNER_START=["./run.sh"]
+
 # ---- panel(web) 读的 ----
 # CI Job 看板的仓库列表，逗号分隔。只在面板仓库列表还是空的时候导入一次，
 # 之后仓库由面板 UI 管理（见 panel/src/app/service/repo_service.ts 的 migrateFromEnv）。

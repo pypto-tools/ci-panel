@@ -133,7 +133,7 @@ describe("the supervision axes", () => {
   it("keeps intent and observation as two separate unions", () => {
     // Exhaustive by type: adding a member reddens the object, which is the point — the same edit
     // has to add a registry row on the daemon side and a label on the frontend side.
-    const KINDS: Record<SupervisorKind, true> = { systemd: true, none: true };
+    const KINDS: Record<SupervisorKind, true> = { systemd: true, process: true, none: true };
     const OWNERSHIP: Record<RunnerOwnership, true> = {
       self: true,
       foreign: true,
@@ -141,7 +141,7 @@ describe("the supervision axes", () => {
       idle: true,
       unknown: true
     };
-    expect(Object.keys(KINDS).sort()).toEqual(["none", "systemd"]);
+    expect(Object.keys(KINDS).sort()).toEqual(["none", "process", "systemd"]);
     // "unknown" is load-bearing: it is what keeps a failed observation from reading as "idle",
     // which is the one value that lets a start through.
     expect(Object.keys(OWNERSHIP)).toContain("unknown");

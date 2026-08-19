@@ -19,9 +19,14 @@ RestartSec=3
 # (root 所有、单元名整串锚定校验、只认 ALLOWED_ROOT 下含 .runner 的目录)，
 # 详见 prod-scripts/README.md。
 #
-# 也不需要 KillMode=process: runner 跑在自己的 actions.runner.*.service 单元里，
-# 由 systemd 经 D-Bus 启动、有独立 cgroup，不是 daemon 的子进程。所以重启或更新
-# daemon 不会打断正在跑的 CI job。
+# KillMode=process: 走 systemd 托管时 runner 跑在自己的 actions.runner.*.service 单元里，
+# 由 systemd 经 D-Bus 启动、有独立 cgroup，本来就不受这里影响。但节点也可能改走 process 托管
+# (CIP_RUNNER_SUPERVISOR=process，或特权助手坏掉时自动退到它)，那时 run.sh 真是 daemon 的
+# 子进程、就在 daemon 的 cgroup 里，默认的 KillMode=control-group 会在 systemctl restart
+# ci-panel-daemon 时把正在跑 job 的 listener 一起杀掉。daemon 给子进程加的 detached 只带来
+# 新进程组与新会话，逃不出 cgroup，只有这一行能。
+# (即便不加，收敛循环也会在重启后把它们拉回来，但白丢一次可能几小时的 NPU job 不划算。)
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target

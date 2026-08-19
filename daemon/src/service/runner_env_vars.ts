@@ -7,11 +7,11 @@
 import fs from "fs-extra";
 import path from "path";
 import logger from "./log";
+import type { RunnerEnvSection, RunnerEnvVar } from "mcsmanager-common";
 
-export interface RunnerEnvVar {
-  key: string;
-  value: string;
-}
+// 声明在 common/src/runner_protocol.ts，三方共用。这里只转出去，免得已有的
+// `from "./runner_env_vars"` 全要改路径 —— 之前这里是第二份手写声明。
+export type { RunnerEnvVar, RunnerEnvSection };
 
 // 环境变量名白名单，与助手脚本一致（允许小写，如既有 .env 里的 http_proxy/no_proxy）
 export const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -81,4 +81,20 @@ export function writeDotEnvFile(dir: string, desired: RunnerEnvVar[]): void {
     throw new Error(`写 .env 失败: ${err?.message || err}`);
   }
   logger.info(`[runner-env] dotenv: 写 ${file}（${desired.length} 个变量）`);
+}
+
+// 读某个目标文件并解析成一节。文件不存在 = present:false（正常空态）；读失败 = 带 error
+// （与「空」区分开，写入路径据此中止，避免把读不到的既有变量当成「本来就没有」而整份抹掉）。
+//
+// 两个作用域共用它：job 作用域读 <dir>/.env，listener 作用域由各托管后端读自己的存储
+// （systemd 读 drop-in override.conf）。所以它放在这个叶子模块，不放在任何一边。
+export function readSection(file: string, parse: (t: string) => RunnerEnvVar[]): RunnerEnvSection {
+  try {
+    if (!fs.existsSync(file)) return { present: false, vars: [] };
+    return { present: true, vars: parse(fs.readFileSync(file, "utf8")) };
+  } catch (err: any) {
+    const msg = err?.message || String(err);
+    logger.warn(`[runner-env] 读 ${file} 失败: ${msg}`);
+    return { present: true, vars: [], error: msg };
+  }
 }

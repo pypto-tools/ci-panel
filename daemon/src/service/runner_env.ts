@@ -13,9 +13,14 @@ import path from "path";
 import logger from "./log";
 import { assertUnderRoots, readServiceName as readUnitFile } from "./runner_scan";
 import { setServiceEnv } from "./runner_provision";
+// override.conf 的路径与解析属于 systemd 这一种托管方式，已随后端搬过去；这里引用同一份，
+// 不再各留一份（第 6 步这条路会整个改走后端的 readListenerEnv/writeListenerEnv）。
+import { overrideConfPath, parseOverrideConf } from "./supervisor/systemd";
+import type { RunnerEnvSection } from "mcsmanager-common";
 import { dirKey, serviceKey, withRunnerLock } from "./runner_lock";
 import {
   dotenvPath,
+  readSection,
   sanitizeEnvVars,
   writeDotEnvFile,
   type RunnerEnvVar
@@ -30,14 +35,8 @@ export type EnvTarget = "override" | "dotenv";
 
 export type { RunnerEnvVar };
 
-// 单个目标文件的一节：是否存在 + 其中的变量
-export interface RunnerEnvSection {
-  present: boolean; // 目标文件是否已存在
-  vars: RunnerEnvVar[];
-  // 读取失败的原因（权限、EIO 等）。有值时 vars 不可信：merge 写入必须中止，
-  // 否则会把读不到的既有变量当成「本来就没有」而整份覆盖掉。
-  error?: string;
-}
+// 一节的形状声明在 common（三方共用），这里转出去，免得已有的 import 全要改路径
+export type { RunnerEnvSection };
 
 export interface RunnerEnvResult {
   dir: string;
@@ -71,58 +70,6 @@ function readServiceName(dir: string): string {
   return svc;
 }
 
-function overrideConfPath(service: string): string {
-  return path.join("/etc/systemd/system", `${service}.d`, "override.conf");
-}
-
-// 解析一行 Environment= 后半段：支持 "K=V" 双引号(含 \" \\ 转义)与裸 token，空白分隔多条。
-function parseEnvironmentLine(rest: string): RunnerEnvVar[] {
-  const out: RunnerEnvVar[] = [];
-  let i = 0;
-  while (i < rest.length) {
-    while (i < rest.length && /\s/.test(rest[i])) i++;
-    if (i >= rest.length) break;
-    let token = "";
-    if (rest[i] === '"') {
-      i++;
-      while (i < rest.length && rest[i] !== '"') {
-        if (rest[i] === "\\" && i + 1 < rest.length) {
-          token += rest[i + 1];
-          i += 2;
-        } else {
-          token += rest[i];
-          i++;
-        }
-      }
-      i++; // 跳过收尾引号
-    } else {
-      while (i < rest.length && !/\s/.test(rest[i])) {
-        token += rest[i];
-        i++;
-      }
-    }
-    const eq = token.indexOf("=");
-    // systemd 说明符还原：写入时字面 % 被转义成 %%（见助手脚本 set-env），读回时还原，
-    // 否则「读→回显→保存」每过一轮就把 % 翻一倍。
-    if (eq > 0)
-      out.push({ key: token.slice(0, eq), value: token.slice(eq + 1).replace(/%%/g, "%") });
-  }
-  return out;
-}
-
-// 解析 override.conf 里的 Environment= 行。空 Environment=(重置标记)跳过。
-function parseOverrideConf(text: string): RunnerEnvVar[] {
-  const vars: RunnerEnvVar[] = [];
-  for (const raw of text.split("\n")) {
-    const line = raw.trim();
-    if (!line.startsWith("Environment=")) continue;
-    const rest = line.slice("Environment=".length).trim();
-    if (!rest) continue; // 空 Environment= 是重置标记，无值
-    vars.push(...parseEnvironmentLine(rest));
-  }
-  return vars;
-}
-
 // 解析 .env：每行 KEY=VALUE，按首个 = 切分，值原样（不去引号）。跳过空行与 # 注释。
 function parseDotEnv(text: string): RunnerEnvVar[] {
   const vars: RunnerEnvVar[] = [];
@@ -135,19 +82,6 @@ function parseDotEnv(text: string): RunnerEnvVar[] {
     vars.push({ key: line.slice(0, eq).trim(), value: line.slice(eq + 1) });
   }
   return vars;
-}
-
-// 读某目标文件并解析为一节。文件不存在 = present:false（正常空态）；
-// 读失败 = 带 error（与「空」区分开，写入路径据此中止，避免误删）。
-function readSection(file: string, parse: (t: string) => RunnerEnvVar[]): RunnerEnvSection {
-  try {
-    if (!fs.existsSync(file)) return { present: false, vars: [] };
-    return { present: true, vars: parse(fs.readFileSync(file, "utf8")) };
-  } catch (err: any) {
-    const msg = err?.message || String(err);
-    logger.warn(`[runner-env] 读 ${file} 失败: ${msg}`);
-    return { present: true, vars: [], error: msg };
-  }
 }
 
 // 读某 runner 两个目标当前托管的环境变量（面板回显用，均只读、免 sudo）
@@ -181,11 +115,7 @@ function resolveDesired(current: RunnerEnvVar[], patch: RunnerEnvPatch): RunnerE
 // 写 override.conf：算出目标全量 → 特权助手写 drop-in + daemon-reload（不重启）。
 // 助手调用本身在 runner_provision（置备时写初始变量走的是同一条路），这里只加一道
 // 「没装服务就别写」的前置判断。
-async function writeOverride(
-  dir: string,
-  service: string,
-  desired: RunnerEnvVar[]
-): Promise<void> {
+async function writeOverride(dir: string, service: string, desired: RunnerEnvVar[]): Promise<void> {
   if (!service) throw new Error("该 runner 未装 systemd 服务，无法设置 systemd 环境变量");
   await setServiceEnv(dir, desired);
 }

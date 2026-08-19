@@ -1,8 +1,15 @@
+import fs from "fs";
+import path from "path";
 import { describe, expect, it } from "vitest";
 import {
   collectRegisteredRepoSlugs,
   type RegisterRunnerResult,
-  type RegisterRunnersResponse
+  type RegisterRunnersResponse,
+  type RunnerOwnership,
+  type RunnerRunState,
+  type RunnerRuntimeState,
+  type SupervisorAction,
+  type SupervisorKind
 } from "../../src/runner_protocol";
 
 // panel forwards daemon's runner/register reply and mines it for repo slugs to auto-register.
@@ -61,9 +68,9 @@ describe("what must NOT be collected", () => {
 
   it("treats a truthy-but-not-true ok as a failure", () => {
     // `ok` is declared boolean; anything else means the payload is not what it claims to be.
-    expect(
-      collectRegisteredRepoSlugs({ results: [{ dir: "/r/a", ok: 1, repo: REPO }] })
-    ).toEqual([]);
+    expect(collectRegisteredRepoSlugs({ results: [{ dir: "/r/a", ok: 1, repo: REPO }] })).toEqual(
+      []
+    );
   });
 });
 
@@ -100,10 +107,12 @@ describe("the field names are the contract", () => {
   });
 
   it("reads `ok` and `repo` from each item", () => {
-    expect(collectRegisteredRepoSlugs({ results: [{ dir: "/r/a", success: true, repo: REPO }] }))
-      .toEqual([]);
-    expect(collectRegisteredRepoSlugs({ results: [{ dir: "/r/a", ok: true, slug: REPO }] }))
-      .toEqual([]);
+    expect(
+      collectRegisteredRepoSlugs({ results: [{ dir: "/r/a", success: true, repo: REPO }] })
+    ).toEqual([]);
+    expect(
+      collectRegisteredRepoSlugs({ results: [{ dir: "/r/a", ok: true, slug: REPO }] })
+    ).toEqual([]);
   });
 
   it("keeps RegisterRunnersResponse assignable to what the function accepts", () => {
@@ -113,5 +122,78 @@ describe("the field names are the contract", () => {
     // verified by renaming the interface, which reports this exact line.
     const response: RegisterRunnersResponse = { results: [], registeredRepos: [] };
     expect(collectRegisteredRepoSlugs(response)).toEqual([]);
+  });
+});
+
+// The supervision protocol is consumed by three packages that ship separately. These pins are
+// about the shape surviving a rename: the frontend renders label tables keyed by these unions,
+// and daemon's registry is a Record over SupervisorKind, so a quiet member change reaches users
+// as an unlabelled tag or a backend that stops being reachable.
+describe("the supervision axes", () => {
+  it("keeps intent and observation as two separate unions", () => {
+    // Exhaustive by type: adding a member reddens the object, which is the point — the same edit
+    // has to add a registry row on the daemon side and a label on the frontend side.
+    const KINDS: Record<SupervisorKind, true> = { systemd: true, none: true };
+    const OWNERSHIP: Record<RunnerOwnership, true> = {
+      self: true,
+      foreign: true,
+      conflict: true,
+      idle: true,
+      unknown: true
+    };
+    expect(Object.keys(KINDS).sort()).toEqual(["none", "systemd"]);
+    // "unknown" is load-bearing: it is what keeps a failed observation from reading as "idle",
+    // which is the one value that lets a start through.
+    expect(Object.keys(OWNERSHIP)).toContain("unknown");
+  });
+
+  it("keeps the run state a closed set", () => {
+    // A free-form string would have every consumer string-matching per backend.
+    const STATES: Record<RunnerRunState, true> = {
+      running: true,
+      starting: true,
+      stopping: true,
+      stopped: true,
+      failed: true,
+      unknown: true
+    };
+    expect(Object.keys(STATES)).toHaveLength(6);
+  });
+
+  it("keeps the field names the panel and frontend read", () => {
+    const rt: RunnerRuntimeState = {
+      supervisor: "systemd",
+      ownership: "self",
+      running: true,
+      state: "running",
+      detail: "",
+      since: "",
+      busy: false,
+      raw: { service: "actions.runner.x.service" }
+    };
+    expect(Object.keys(rt).sort()).toEqual(
+      ["busy", "detail", "ownership", "raw", "running", "since", "state", "supervisor"].sort()
+    );
+    // raw is display-only by contract, so it is deliberately untyped per backend — which is
+    // exactly why nothing may branch on it.
+    expect(typeof rt.raw?.service).toBe("string");
+  });
+
+  it("no longer declares a systemd-shaped state in the protocol", () => {
+    // Keeping it would leave a systemd-shaped hole the next backend has nowhere to fit into. The
+    // four fields live in raw now; the compat copy that the daemon backfills for a not-yet-
+    // upgraded panel is deliberately a separate, deprecated type.
+    const src = fs.readFileSync(path.resolve(__dirname, "../../src/runner_protocol.ts"), "utf8");
+    expect(src).not.toMatch(/export interface SystemdState\b/);
+    expect(src).toMatch(/export interface SystemdStateCompat\b/);
+    const index = fs.readFileSync(path.resolve(__dirname, "../../src/index.ts"), "utf8");
+    expect(index).not.toMatch(/\bSystemdState\b(?!Compat)/);
+  });
+
+  it("keeps the action union stable across the rename", () => {
+    // SupervisorAction is the new name; the wire values must not move, or a new panel talking to
+    // an old daemon (and the reverse) silently stops controlling anything.
+    const ACTIONS: Record<SupervisorAction, true> = { start: true, stop: true, restart: true };
+    expect(Object.keys(ACTIONS).sort()).toEqual(["restart", "start", "stop"]);
   });
 });

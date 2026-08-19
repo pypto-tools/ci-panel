@@ -27,6 +27,12 @@ const REGISTRY: readonly RunnerSupervisorFactory[] = Object.values(FACTORIES).so
   (a, b) => b.priority - a.priority
 );
 
+// 已注册的托管方式。Record 只保证形状对得上，不保证有人真去遍历它 —— 覆盖性由
+// daemon/test/pure-logic/registry_detect.spec.ts 盯着，漏注册的后果是新后端静默变成死代码。
+export function registeredKinds(): SupervisorKind[] {
+  return Object.keys(FACTORIES) as SupervisorKind[];
+}
+
 export function isSupervisorKind(v: unknown): v is SupervisorKind {
   return typeof v === "string" && v in FACTORIES;
 }
@@ -71,6 +77,13 @@ export function nodeCapabilities(): SupervisorCapability[] {
         `${c.isDefault ? " ← 节点默认" : ""}`
     );
   return capabilities;
+}
+
+// 仅供测试：能力是进程内 memo 的，而覆盖性与 CIP_RUNNER_SUPERVISOR 的用例必须能换一组 env
+// 重新探测。生产代码不许调它 —— 探测结果在一次运行内必须是稳定的（意图落盘就是为了这件事）。
+export function __resetNodeCapabilitiesForTest(): void {
+  capabilities = null;
+  instances.clear();
 }
 
 export function nodeDefaultSupervisor(): SupervisorKind {

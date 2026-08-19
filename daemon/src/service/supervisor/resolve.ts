@@ -11,6 +11,7 @@ import { dirKey, withRunnerLock } from "../runner_lock";
 import { metaFilePath, readMarker, type RunnerMarker } from "../runner_marker";
 import { errText } from "../runner_provision";
 import { scanListenerProcs, type ListenerProc } from "./local_procs";
+import { ownershipOf } from "./ownership";
 import { availableBackends, backendFor, isSupervisorKind, nodeDefaultSupervisor } from "./registry";
 import type { Observation, ObservedInstance } from "./types";
 import type {
@@ -122,27 +123,6 @@ export async function observeAll(dirs: string[]): Promise<ObserveResult> {
     ),
     complete
   };
-}
-
-/**
- * 由观测算出归属。**只数实例个数、不读 state**，这是刻意的：systemd 单元 failed/inactive 但
- * listener 还活着是真实存在的状态，按 state 过滤掉它们会让归属退化成 idle 并放行 start，
- * 正好制造要防的那种双托管。要保证的东西在输入侧——observe 的「只报活体」契约。
- */
-export function ownershipOf(
-  declared: SupervisorKind,
-  instances: ObservedInstance[],
-  complete = true
-): RunnerOwnership {
-  // 「答不出」与「确实没有」必须分开，fail closed：unknown 不放行 start
-  if (!complete && instances.length === 0) return "unknown";
-  if (instances.length === 0) return "idle";
-  if (instances.length > 1) return "conflict"; // 同一目录跑起两个 listener，一定要告警
-  if (instances[0].disputed) return "conflict"; // 两个后端同时认领同一个实例
-  const by = instances[0].by;
-  if (!by) return "foreign";
-  // 被声明之外的后端管着：意图与实际不符（典型来源就是助手坏掉那个场景），同样危险
-  return by === declared ? "self" : "conflict";
 }
 
 // ---- 控制 ----

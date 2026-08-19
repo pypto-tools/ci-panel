@@ -202,7 +202,12 @@ export async function writeListenerEnvFile(markerId: string, vars: RunnerEnvVar[
   // **先收权限，再写内容。** writeFile 的 mode 只在创建时生效，文件已经存在（早先版本以更宽的
   // 位建过、或受 umask 影响）时它不会收紧任何东西；而先写后收的话，凭据会在宽权限下暴露一个
   // 真实存在的窗口。文件不存在时这次 chmod 是 ENOENT，忽略即可 —— 随后的 writeFile 会以 0600 建。
-  await fs.chmod(file, 0o600).catch(() => undefined);
+  await fs.chmod(file, 0o600).catch((err: unknown) => {
+    // 只放过 ENOENT：文件还不存在时这次 chmod 本就无事可做，紧接着的 writeFile 会以 0600 建。
+    // 其余错误（EPERM、EACCES、只读挂载…）必须抛出去 —— 吞掉就等于往一个**权限没收紧的**文件
+    // 里写进代理凭据，而这行代码的全部意义就是不让那件事发生。
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
+  });
   // 0600：这份文件装代理凭据，同组/其他用户不该读得到
   await fs.writeFile(file, formatEnvLines(desired) + "\n", { encoding: "utf8", mode: 0o600 });
 }

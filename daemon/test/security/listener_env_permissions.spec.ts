@@ -67,4 +67,24 @@ describe("the listener environment file", () => {
     expect(modeWhenSecretLanded).toBe(0o600);
     expect(modeOf(file)).toBe(0o600);
   });
+
+  it("refuses to write the credentials when it cannot tighten the mode", async () => {
+    // Swallowing every chmod error would defeat the point: an EPERM (someone else owns the file,
+    // a read-only mount) would leave the file wide open and the write would go ahead anyway.
+    // Only ENOENT — "nothing to tighten yet" — may be ignored.
+    const file = await preCreateWide();
+    const chmodSpy = vi
+      .spyOn(fs, "chmod")
+      .mockRejectedValue(
+        Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" })
+      );
+    const writeSpy = vi.spyOn(fs, "writeFile");
+
+    await expect(writeListenerEnvFile(MARKER_ID, VARS)).rejects.toThrow(/EPERM/);
+
+    expect(writeSpy).not.toHaveBeenCalled();
+    // The old contents are still there; no secret was written at the wider mode.
+    chmodSpy.mockRestore();
+    expect(fs.readFileSync(file, "utf8")).toBe("OLD=1\n");
+  });
 });

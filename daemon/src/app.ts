@@ -14,6 +14,8 @@ import logger from "./service/log";
 import * as protocol from "./service/protocol";
 import * as router from "./service/router";
 import { initRunnerRoots } from "./service/runner_scan";
+import { startReconcileLoop } from "./service/supervisor/reconcile";
+import { nodeCapabilities } from "./service/supervisor/registry";
 import InstanceSubsystem from "./service/system_instance";
 import "./service/system_visual_data";
 import uploadManager from "./service/upload_manager";
@@ -114,6 +116,12 @@ try {
   logger.error($t("TXT_CODE_app.instanceLoadError"), err);
   process.exit(-1);
 }
+
+// runner 托管：先探一次节点能力（结果进日志，说明白这个节点为什么用不了 systemd），再起收敛
+// 循环。**顺序有约束**：收敛循环发现 runner 的方式是遍历句柄实例的 cwd，实例还没载入时它拿到
+// 的是空数组，而它的第一拍正是「daemon 更新重启后立刻把该跑的 runner 拉回来」的那一拍。
+nodeCapabilities();
+startReconcileLoop();
 
 (function initCompressModule() {
   try {

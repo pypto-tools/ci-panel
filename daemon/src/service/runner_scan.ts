@@ -42,6 +42,7 @@ import { canonicalPath } from "../tools/path_link_check";
 import { legacyManagedBy, legacySystemdState } from "./supervisor/legacy";
 import { scanListenerProcs } from "./supervisor/local_procs";
 import { toRuntimeState } from "./supervisor/ownership";
+import { nodeDefaultSupervisor } from "./supervisor/registry";
 import { isSupervisorAction, observeAll, resolveSupervisor } from "./supervisor/resolve";
 import { runUnitAction, stopBeforeUninstall } from "./supervisor/systemd";
 import type {
@@ -76,9 +77,14 @@ let runnerRoots: string[] = parseRoots(process.env.CIP_SCAN_ROOTS || FALLBACK_RO
 export function initRunnerRoots(): void {
   const pre = queryHelperPreflight();
   if (!pre) {
+    // 文案按节点默认的托管方式分支：在 process 节点（容器、hi launch 起的机器）上「助手不可用」
+    // 是正常状态，继续引导用户去装一个根本用不上的助手只会误导——现场那台机器就被这条误导过。
+    const hint =
+      nodeDefaultSupervisor() === "systemd"
+        ? "创建 runner 时若被助手拒绝，请跑 prod-scripts/install-runner-privileges.sh"
+        : "本节点不走 systemd 托管，助手不可用属正常，不必安装";
     logger.warn(
-      `[runner-scan] 取不到特权助手的 ALLOWED_ROOT，暂用 ${runnerRoots.join(", ")}。` +
-        `创建 runner 时若被助手拒绝，请跑 prod-scripts/install-runner-privileges.sh`
+      `[runner-scan] 取不到特权助手的 ALLOWED_ROOT，暂用 ${runnerRoots.join(", ")}。${hint}`
     );
     return;
   }
@@ -373,7 +379,7 @@ function reconcileHandle(r: ScannedRunner) {
 // 句柄实例，其 cwd 就是 runner 目录（实例配置持久化、重启不丢）。所以直接从实例 cwd 拿到全部
 // 被管理 runner，不再遍历 CIP_SCAN_ROOTS——runner 放在任意位置都能被列出，不受扫描根限制。
 // 仍以 .cipanel 过滤，排除 global 等非 runner 实例（它们目录里没有 .cipanel）。
-function managedRunnerDirs(): string[] {
+export function managedRunnerDirs(): string[] {
   const seen = new Set<string>();
   const dirs: string[] = [];
   for (const inst of InstanceSubsystem.instances.values()) {

@@ -13,12 +13,14 @@
 import { $t } from "../../i18n";
 import logger from "../log";
 import { noneFactory } from "./none";
+import { processFactory } from "./process";
 import { systemdFactory } from "./systemd";
 import type { RunnerSupervisor, RunnerSupervisorFactory } from "./types";
 import type { SupervisorKind } from "mcsmanager-common";
 
 const FACTORIES = {
   systemd: systemdFactory, // priority 30
+  process: processFactory, // priority 20，恒可用（能跑 daemon 就能 fork）
   none: noneFactory // priority 0，恒可用，兜底
 } satisfies Record<SupervisorKind, RunnerSupervisorFactory>;
 

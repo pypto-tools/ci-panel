@@ -45,6 +45,11 @@ const OP_LABEL: Record<RunnerOp, string> = {
 export const dirKey = (dir: string): string => `dir:${canonicalPath(dir)}`;
 export const serviceKey = (service: string): string => `svc:${service}`;
 
+// 「有人正占着这把锁」与「fn 自己失败了」必须能分开：reconcile 每 15 秒撞上一次正在进行的
+// 删除是完全正常的（跳过本轮即可），而把它记成 error 会让日志里塞满假故障。用类型区分而不是
+// 匹配错误文案——本仓一贯不拿错误信息子串做控制流（改一个字就会静默降级）。
+export class RunnerLockBusyError extends Error {}
+
 const holders = new Map<string, RunnerOp>();
 
 // 占住 keys 跑 fn；任一 key 已被占用就直接抛错，不等待。fn 无论成败都会释放。
@@ -58,7 +63,7 @@ export async function withRunnerLock<T>(
     const owner = holders.get(key);
     // 错误信息里带上冲突的那个目标（去掉命名空间前缀），批量操作时才看得出是哪一个被挡了
     if (owner)
-      throw new Error(
+      throw new RunnerLockBusyError(
         `${key.slice(key.indexOf(":") + 1)} 正在${OP_LABEL[owner]}中，请等它结束后再试`
       );
   }

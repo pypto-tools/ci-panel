@@ -42,7 +42,7 @@ export interface RegisterRunnersResponse {
 // 新增一种托管方式时**这里加一个成员**，两张表驱动的映射（daemon 的后端注册表、frontend 的
 // 标签表）会当场编译失败 —— 被强制补全的是表里的一条，而不是散落各处的 if 分支。所以成员与
 // 后端实现同一次落地，不提前占位：占位的那一格既没有实现也没有标签，编译器反而不再提醒任何人。
-export type SupervisorKind = "systemd" | "none";
+export type SupervisorKind = "systemd" | "process" | "none";
 
 // 面板能下的托管动作。取值与线上的 SystemdAction 一致，只是名字不再绑 systemd。
 export type SupervisorAction = "start" | "stop" | "restart";

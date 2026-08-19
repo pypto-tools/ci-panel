@@ -687,6 +687,7 @@
   "TXT_CODE_app.configPathTip": "Configuration File: data/Config/global.json",
   "TXT_CODE_app.doc": "Reference Documentation: https://docs.mcsmanager.com/",
   "TXT_CODE_app.exitTip": "You can use the Ctrl+C shortcut to close the program",
+  "TXT_CODE_app.forcedShutdown": "Forcing shutdown, all instances will be closed immediately.",
   "TXT_CODE_app.host": "Access URL: http://localhost:{{port}}",
   "TXT_CODE_app.httpSetupError": "HTTP/Socket service startup error, possibly due to port occupation, insufficient permissions, or unavailable network device.",
   "TXT_CODE_app.instanceLoad": "All {{n}} instances have been loaded.",
@@ -1375,5 +1376,19 @@
   "TXT_CODE_RUNNER_DIR_IS_ROOT": "The runner directory cannot be /.",
   "TXT_CODE_RUNNER_SERVICE_NAME_INVALID": "Invalid systemd unit name: {{service}}.",
   "TXT_CODE_RUNNER_DETACH_HINT_SYSTEMD": "Stop and uninstall the runner unit on the node with the privileged helper, then retry.",
-  "TXT_CODE_RUNNER_DETACH_HINT_NONE": "Stop the runner process on the node where it was started, then retry."
+  "TXT_CODE_RUNNER_DETACH_HINT_NONE": "Stop the runner process on the node where it was started, then retry.",
+  "TXT_CODE_RUNNER_SPAWN_FAILED": "Failed to start the runner process in {{dir}}; see the node log for the cause.",
+  "TXT_CODE_RUNNER_STOP_NOT_SETTLED": "The runner in {{dir}} did not stop within the deadline.",
+  "TXT_CODE_RUNNER_DETACH_HINT_PROCESS": "Stop the runner process group on the node (kill -INT -<pgid>), then retry.",
+  "TXT_CODE_RUNNER_DELETE_STEP_SUPERVISOR": "Stop and detach from the supervisor",
+  "TXT_CODE_RUNNER_PROVISION_STEP_SUPERVISOR": "Hand over to the supervisor",
+  "TXT_CODE_RUNNER_DELETE_STEP_GITHUB": "Deregister from GitHub",
+  "TXT_CODE_RUNNER_DELETE_STEP_PANEL": "Remove the panel handle instance and the managed marker",
+  "TXT_CODE_RUNNER_DELETE_STEP_DIR": "Delete the runner directory",
+  "TXT_CODE_RUNNER_DELETE_SKIPPED_NOT_STOPPED": "The runner did not stop, so every later step was skipped to avoid deleting a running runner.",
+  "TXT_CODE_RUNNER_PROVISION_STEP_ENV_WRITE": "Write the listener environment variables",
+  "TXT_CODE_RUNNER_PROVISION_STEP_ENV_RESTART": "Restart to apply the environment variables",
+  "TXT_CODE_RUNNER_ENV_TARGET_UNKNOWN": "Unknown environment variable scope: {{target}}.",
+  "TXT_CODE_RUNNER_UNIT_NOT_FOUND": "No managed runner directory owns the unit {{service}}.",
+  "TXT_CODE_RUNNER_UNIT_FAILED": "The systemd unit is in the failed state ({{subState}})."
 }

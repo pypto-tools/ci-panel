@@ -1,23 +1,28 @@
-// CI Panel 扩展：管理 runner 的环境变量。两个目标、两套语义（这批机器 runsvc.sh 不 source .env）：
+// CI Panel 扩展：管理 runner 的环境变量。两个**作用域**、两套语义（这批机器的 runsvc.sh
+// 不 source .env）：
 //
-//   override —— systemd drop-in /etc/systemd/system/<svc>.d/override.conf 的 Environment=。
-//               进「监听进程」，代理这类要让 Runner.Listener 连上 GitHub 的变量必须放这里。
-//               需 root：set 走特权助手 ci-panel-runner-svc(sudo -n)；读免 sudo(0644)。
-//   dotenv  —— runner 目录下的 .env。runsvc 不 source 它，故不进监听进程，只被 runner 程序
+//   listener —— 进「监听进程」自己的环境。代理这类要让 Runner.Listener 连上 GitHub 的变量
+//               必须放这里。**存在哪儿由托管后端说了算**：systemd 后端写 root 拥有的 drop-in
+//               （经特权助手），process 后端写 daemon 私有目录里的一份 env 文件。
+//   job      —— runner 目录下的 .env。runsvc 不 source 它，故不进监听进程，只被 runner 程序
 //               读取、注入到每个 job/step 的执行环境（设备号、库路径这类）。文件属主即 daemon
-//               运行用户(ci-runner)，故读写都直接走 fs，无需 sudo、无需 daemon-reload。
+//               运行用户，读写都直接走 fs。
 //
-// 两个目标都是「面板整表托管」：读回显 → 用户编辑 → 覆盖写回。变量名白名单、值禁换行，防注入。
+// 线上字段名仍叫 override / dotenv（见 common 的 EnvTarget）：改名会让新前端发给老 daemon 的
+// 值落到它那条宽松归一上，把只该进 job 的变量静默写进 root 拥有的 drop-in。映射只在路由边界
+// 做一次，本模块内部一律用作用域说话。
+//
+// 两个作用域都是「面板整表托管」：读回显 → 用户编辑 → 覆盖写回。变量名白名单、值禁换行，防注入。
 import fs from "fs-extra";
 import path from "path";
-import logger from "./log";
-import { assertUnderRoots, readServiceName as readUnitFile } from "./runner_scan";
-import { setServiceEnv } from "./runner_provision";
-// override.conf 的路径与解析属于 systemd 这一种托管方式，已随后端搬过去；这里引用同一份，
-// 不再各留一份（第 6 步这条路会整个改走后端的 readListenerEnv/writeListenerEnv）。
-import { overrideConfPath, parseOverrideConf } from "./supervisor/systemd";
-import type { RunnerEnvSection } from "mcsmanager-common";
-import { dirKey, serviceKey, withRunnerLock } from "./runner_lock";
+import { $t } from "../i18n";
+import { canonicalPath } from "../tools/path_link_check";
+import { assertUnderRoots } from "./runner_scan";
+import { readMarker } from "./runner_marker";
+import { backendFor } from "./supervisor/registry";
+import { resolveSupervisor } from "./supervisor/resolve";
+import type { RunnerSupervisor, SupervisorTarget } from "./supervisor/types";
+import { dirKey, withRunnerLock } from "./runner_lock";
 import {
   dotenvPath,
   readSection,
@@ -25,26 +30,31 @@ import {
   writeDotEnvFile,
   type RunnerEnvVar
 } from "./runner_env_vars";
+import type { EnvTarget, RunnerEnvResult, RunnerEnvSection } from "mcsmanager-common";
 
-// 单元名正则，与 daemon controlService / 助手脚本保持一致，防路径穿越。
-// 三处各写一份是刻意的边界冗余，一致性由 daemon/test/security/service_name_boundary.spec.ts 盯住。
-const SERVICE_RE = /^actions\.runner\.[A-Za-z0-9._@-]+\.service$/;
+// 内部作用域。与线上取值的映射只在路由边界做一次（见 scopeOfTarget）
+export type EnvScope = "listener" | "job";
 
-// 写入目标：systemd drop-in 或 runner 目录的 .env
-export type EnvTarget = "override" | "dotenv";
+// 线上取值 → 内部作用域。表驱动：协议加一个作用域时这张 Record 会编译失败。
+const SCOPE_BY_TARGET: Record<EnvTarget, EnvScope> = {
+  override: "listener",
+  dotenv: "job"
+};
 
-export type { RunnerEnvVar };
-
-// 一节的形状声明在 common（三方共用），这里转出去，免得已有的 import 全要改路径
-export type { RunnerEnvSection };
-
-export interface RunnerEnvResult {
-  dir: string;
-  service: string; // systemd 单元名，空 = 未装服务
-  hasSystemd: boolean; // 是否装了 systemd 服务（未装则不能写 override）
-  override: RunnerEnvSection; // systemd drop-in override.conf（进监听进程）
-  dotenv: RunnerEnvSection; // runner 目录 .env（只进 job/step）
+/**
+ * 映射不到就**抛**，不许照抄老 daemon 路由层那句 `target === "dotenv" ? "dotenv" : "override"`
+ * 的宽松归一：那句话会把任何认不出的值归成 override，于是只该进 job 的变量（设备号、库路径）
+ * 被写进 root 拥有的 drop-in，还泄进监听进程自己的环境。宁可让请求失败。
+ */
+export function scopeOfTarget(target: unknown): EnvScope {
+  // hasOwnProperty 而不是直接索引：target 来自请求体，`"toString"` 会从原型链上取到一个函数，
+  // 真值判断放它过去，随后被当成作用域用 —— 与 controlRunner 校验动作名时同一条理由。
+  if (typeof target !== "string" || !Object.prototype.hasOwnProperty.call(SCOPE_BY_TARGET, target))
+    throw new Error($t("TXT_CODE_RUNNER_ENV_TARGET_UNKNOWN", { target: String(target) }));
+  return SCOPE_BY_TARGET[target as EnvTarget];
 }
+
+export type { EnvTarget, RunnerEnvResult, RunnerEnvSection, RunnerEnvVar };
 
 // set 的补丁：replace=true 时整表覆盖(upsert 即完整清单)；否则合并(upsert 增改、remove 删)。
 export interface RunnerEnvPatch {
@@ -53,21 +63,21 @@ export interface RunnerEnvPatch {
   replace?: boolean;
 }
 
-// 校验并规范化 runner 目录：绝对路径、在扫描根内、含 .runner
+// 校验并规范化 runner 目录：绝对路径、在扫描根内、含 .runner。
+// canonicalPath 而不是 normalize：同一个 runner 在这条路上必须算出与归属判定完全相同的字符串，
+// 否则软链节点上这里锁的 key 与那边比对的 key 不是同一个。
 function normalizeRunnerDir(dirRaw: string): string {
-  const dir = path.normalize(String(dirRaw || ""));
+  const dir = canonicalPath(String(dirRaw || ""));
   assertUnderRoots(dir);
   if (!fs.existsSync(path.join(dir, ".runner")))
     throw new Error(`不是 runner 目录(缺 .runner): ${dir}`);
   return dir;
 }
 
-// 读 <dir>/.service 拿单元名；未装服务(读不到)返回空串，但内容非法必须抛——
-// 校验放在读取之外，避免用错误信息子串来决定是否 rethrow（改一个字就会静默降级）。
-function readServiceName(dir: string): string {
-  const svc = readUnitFile(dir);
-  if (svc && !SERVICE_RE.test(svc)) throw new Error(`非法的服务名: ${svc}`);
-  return svc;
+// 这个目录归哪个后端管。读它的 marker 意图，marker 缺失/老版本时按「装过单元的算 systemd，
+// 其余交给节点默认」推断（见 resolveSupervisor）。
+function backendOf(dir: string) {
+  return backendFor(resolveSupervisor(dir, readMarker(dir)));
 }
 
 // 解析 .env：每行 KEY=VALUE，按首个 = 切分，值原样（不去引号）。跳过空行与 # 注释。
@@ -84,17 +94,34 @@ function parseDotEnv(text: string): RunnerEnvVar[] {
   return vars;
 }
 
-// 读某 runner 两个目标当前托管的环境变量（面板回显用，均只读、免 sudo）
-export function readRunnerEnv(dirRaw: string): RunnerEnvResult {
+/**
+ * 读某 runner 两个作用域当前托管的环境变量（面板回显用，均只读、免 sudo）。
+ *
+ * listener 那一节由后端给：**「能不能写监听进程的环境变量」从此由后端回答，不再由「有没有
+ * systemd 单元」回答** —— 那正是这条修复的要点，无 systemd 的节点此前在面板上根本没有配代理
+ * 的入口。
+ *
+ * 因为后端的 readListenerEnv 返回 Promise（容器后端要 docker inspect、远端要一次 RPC），
+ * 本函数跟着变成 async；三个后端的实现体照样是同步文件读，包一层的成本是零。
+ */
+export async function readRunnerEnv(
+  dirRaw: string,
+  resolved?: { backend: RunnerSupervisor; target?: SupervisorTarget }
+): Promise<RunnerEnvResult> {
   const dir = normalizeRunnerDir(dirRaw);
-  const service = readServiceName(dir);
+  // 调用方已经解析过就复用它那一份，别再解析一次。写入路径必须走这条：它锁的是第一次解析出来
+  // 的单元名，而 .service 是 runner 属主自己能改写的文件 —— 第二次解析可能读到另一个单元，
+  // 于是 merge 的打底值来自 A 单元、写入落到 B 单元（锁只保护了 B），A 那边的既有变量被当成
+  // 「本来就没有」而整份抹掉。这正是 prepare() 存在的理由。
+  const backend = resolved?.backend ?? backendOf(dir);
+  const target = resolved ? resolved.target : backend.prepare?.(dir);
   return {
     dir,
-    service,
-    hasSystemd: Boolean(service),
-    override: service
-      ? readSection(overrideConfPath(service), parseOverrideConf)
-      : { present: false, vars: [] },
+    supervisor: backend.kind,
+    canWriteListenerEnv: backend.kind !== "none",
+    hasSystemd: backend.kind === "systemd", // @deprecated，1.2 移除，届时只留 canWriteListenerEnv
+    // 线上字段名不改（见文件头）：override 装的就是 listener 作用域那一节
+    override: await backend.readListenerEnv(dir, target),
     dotenv: readSection(dotenvPath(dir), parseDotEnv)
   };
 }
@@ -112,39 +139,36 @@ function resolveDesired(current: RunnerEnvVar[], patch: RunnerEnvPatch): RunnerE
   return sanitizeEnvVars(Array.from(map, ([key, value]) => ({ key, value })));
 }
 
-// 写 override.conf：算出目标全量 → 特权助手写 drop-in + daemon-reload（不重启）。
-// 助手调用本身在 runner_provision（置备时写初始变量走的是同一条路），这里只加一道
-// 「没装服务就别写」的前置判断。
-async function writeOverride(dir: string, service: string, desired: RunnerEnvVar[]): Promise<void> {
-  if (!service) throw new Error("该 runner 未装 systemd 服务，无法设置 systemd 环境变量");
-  await setServiceEnv(dir, desired);
-}
-
-// 设置某 runner 某目标的环境变量。override 需 systemd；dotenv 直接写文件。
-// 均不重启：生效由面板另走已白名单的 restart（带 busy 拦截）。
+/**
+ * 设置某 runner 某作用域的环境变量。listener 交给后端（systemd 走特权助手写 drop-in，
+ * process 写 daemon 私有的 env 文件），job 直接写 <dir>/.env。
+ * 两者都不重启：生效由面板另走 restart（带 busy 拦截）。
+ */
 export async function writeRunnerEnv(
   dirRaw: string,
-  target: EnvTarget,
+  scope: EnvScope,
   patch: RunnerEnvPatch
 ): Promise<RunnerEnvResult> {
   const dir = normalizeRunnerDir(dirRaw);
-  // 同样与删除互斥：override 是往 /etc/systemd/system/<svc>.d/ 写 drop-in，删除窗口里放行
-  // 它，就会给一个正被卸掉的单元留下 drop-in 目录（助手的 uninstall 不清它）。
-  // 只有 override 占单元名这个 key：dotenv 只写 <dir>/.env，与单元无关，占了反而会和一次
-  // 慢重启(助手 60 秒超时)互相挡——而「存 .env → 另点重启生效」正是页面上的常规操作顺序。
-  const service = readServiceName(dir);
+  const backend = backendOf(dir);
+  // 动作依据一次解析：读 .service 只发生在 prepare 里，写入与占锁用的是同一份
+  const target = backend.prepare?.(dir);
+  // 与删除互斥：listener 作用域在 systemd 下是往 /etc/systemd/system/<svc>.d/ 写 drop-in，
+  // 删除窗口里放行它，就会给一个正被卸掉的单元留下 drop-in 目录（助手的 uninstall 不清它）。
+  // job 作用域只写 <dir>/.env，与单元无关，所以不占后端那把 key：占了反而会和一次慢重启
+  // （助手 60 秒超时）互相挡，而「存 .env → 另点重启生效」正是页面上的常规操作顺序。
   const keys = [dirKey(dir)];
-  if (service && target === "override") keys.push(serviceKey(service));
+  if (scope === "listener") keys.push(...(target?.lockKeys ?? []));
   return withRunnerLock(keys, "env", async () => {
-    const current = readRunnerEnv(dir);
-    const section = target === "override" ? current.override : current.dotenv;
+    const current = await readRunnerEnv(dir, { backend, target });
+    const section = scope === "listener" ? current.override : current.dotenv;
     // merge 以当前值打底，读不出来就不能写：否则会把既有变量当成「没有」而整份抹掉。
     // replace 是整表覆盖、不依赖当前值，读失败不影响。
     if (section.error && !patch?.replace)
       throw new Error(`读取现有环境变量失败，已中止写入以免误删：${section.error}`);
     const desired = resolveDesired(section.vars, patch || {});
-    if (target === "override") await writeOverride(dir, current.service, desired);
+    if (scope === "listener") await backend.writeListenerEnv(dir, desired, target);
     else writeDotEnvFile(dir, desired);
-    return readRunnerEnv(dir);
+    return readRunnerEnv(dir, { backend, target });
   });
 }

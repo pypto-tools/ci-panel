@@ -29,27 +29,20 @@ import {
 import {
   ensureHandleInstance,
   errText,
-  HELPER_TIMEOUT_MS,
-  helperErrorMessage,
   queryHelperPreflight,
-  removeGithubRegistration,
-  RUNNER_SVC_HELPER,
-  uninstallSystemdService
+  removeGithubRegistration
 } from "./runner_provision";
-import { dirKey, serviceKey, withRunnerLock } from "./runner_lock";
+import { dirKey, withRunnerLock } from "./runner_lock";
 import { $t } from "../i18n";
 import { canonicalPath } from "../tools/path_link_check";
 import { legacyManagedBy, legacySystemdState } from "./supervisor/legacy";
 import { scanListenerProcs } from "./supervisor/local_procs";
 import { toRuntimeState } from "./supervisor/ownership";
-import { isSupervisorAction, observeAll, resolveSupervisor } from "./supervisor/resolve";
-import { runUnitAction, stopBeforeUninstall } from "./supervisor/systemd";
-import type {
-  RegisterRunnerItem,
-  RegisterRunnerResult,
-  ScannedRunner,
-  SupervisorAction
-} from "mcsmanager-common";
+import { detachHint } from "./supervisor/hints";
+import { backendFor, nodeDefaultSupervisor } from "./supervisor/registry";
+import { observeAll, resolveSupervisor } from "./supervisor/resolve";
+import type { RunnerSupervisor, SupervisorTarget } from "./supervisor/types";
+import type { RegisterRunnerItem, RegisterRunnerResult, ScannedRunner } from "mcsmanager-common";
 // 三方共用的声明只在 common 里写一份；这里转出去，免得已有的 import 全要改路径
 export type { ScannedRunner };
 
@@ -76,9 +69,14 @@ let runnerRoots: string[] = parseRoots(process.env.CIP_SCAN_ROOTS || FALLBACK_RO
 export function initRunnerRoots(): void {
   const pre = queryHelperPreflight();
   if (!pre) {
+    // 文案按节点默认的托管方式分支：在 process 节点（容器、hi launch 起的机器）上「助手不可用」
+    // 是正常状态，继续引导用户去装一个根本用不上的助手只会误导——现场那台机器就被这条误导过。
+    const hint =
+      nodeDefaultSupervisor() === "systemd"
+        ? "创建 runner 时若被助手拒绝，请跑 prod-scripts/install-runner-privileges.sh"
+        : "本节点不走 systemd 托管，助手不可用属正常，不必安装";
     logger.warn(
-      `[runner-scan] 取不到特权助手的 ALLOWED_ROOT，暂用 ${runnerRoots.join(", ")}。` +
-        `创建 runner 时若被助手拒绝，请跑 prod-scripts/install-runner-privileges.sh`
+      `[runner-scan] 取不到特权助手的 ALLOWED_ROOT，暂用 ${runnerRoots.join(", ")}。${hint}`
     );
     return;
   }
@@ -373,7 +371,7 @@ function reconcileHandle(r: ScannedRunner) {
 // 句柄实例，其 cwd 就是 runner 目录（实例配置持久化、重启不丢）。所以直接从实例 cwd 拿到全部
 // 被管理 runner，不再遍历 CIP_SCAN_ROOTS——runner 放在任意位置都能被列出，不受扫描根限制。
 // 仍以 .cipanel 过滤，排除 global 等非 runner 实例（它们目录里没有 .cipanel）。
-function managedRunnerDirs(): string[] {
+export function managedRunnerDirs(): string[] {
   const seen = new Set<string>();
   const dirs: string[] = [];
   for (const inst of InstanceSubsystem.instances.values()) {
@@ -478,7 +476,16 @@ export function registerRunners(
       if (!hasMarker(dir)) assertUnderRoots(dir);
       if (!fs.existsSync(path.join(dir, ".runner")))
         throw new Error("不是 runner 目录（缺 .runner）");
-      const marker = writeMarker(dir, { source, repo: it.repo, group: it.group });
+      // 意图与置备那条路一样要落盘：不落的话，每次扫描都从节点能力现推，而特权助手哪天坏了
+      // 推断结果就会翻成另一个后端 —— daemon 会在一个还活着的单元旁边再拉起一个 listener。
+      // 用 resolveSupervisor(dir, null) 而不是节点默认：装过单元的目录要认 systemd，
+      // 这条推断只在此刻做一次，之后认 marker 里记下的那个。
+      const marker = writeMarker(dir, {
+        source,
+        repo: it.repo,
+        group: it.group,
+        supervisor: resolveSupervisor(dir, null)
+      });
       // 从 .runner 读 agentName / repo，作句柄实例的昵称与分组标签。
       // repo 以 .runner 为准、调用方传的只作兜底：面板拿这个返回值去纳管仓库，而
       // 之后 managed_list 归堆用的也是 .runner 里的 slug（见 buildRunners）。两边同源
@@ -672,34 +679,34 @@ export async function deleteRunner(
   if (!fs.existsSync(path.join(dir, ".runner")) && !fs.existsSync(path.join(dir, ".cipanel")))
     throw new Error("不是 runner 目录（无 .runner / .cipanel），拒绝删除");
 
-  // 单元名必须在动手之前读：uninstall 成功后助手会把 <dir>/.service 一并删掉，之后就取不到了。
-  // 内容不合法就不占这个 key —— controlService 本来也会拒掉这种单元名，占了只是白占。
-  // 读不出来（权限、EIO）就拒绝删除：拿不到单元名就占不上那把锁，等于在毫无保护的情况下开删。
-  // 和上面几道守卫一样，把原始 fs 错误包一层，说清楚是「因为这个」才不删的。
-  let service: string;
-  try {
-    service = readServiceName(dir);
-  } catch (err: unknown) {
-    throw new Error(`读取 .service 失败，无法确定 systemd 单元名，拒绝删除: ${errText(err)}`);
-  }
-  const keys = [dirKey(dir)];
-  const lockedService = SERVICE_RE.test(service) ? service : "";
-  if (lockedService) keys.push(serviceKey(lockedService));
-  // 删除期间挡住同一个 runner 的置备与启停（原因见 runner_lock 顶部）。目录与单元名两个 key
-  // 都占：provision 只按目录进来，service_control 只按单元名进来，各挡一条路。
+  // 托管方式与动作依据都在动手之前解析好。prepare() 是全项目唯一一次读 .service —— 那个文件
+  // runner 属主自己就能改写，两次读之间被换掉的话，我们会去停一个「没锁住的」单元，而锁住的
+  // 那个还活着，紧接着目录就被删了。所以解析出来的这一份既是锁的依据，也是后续动作的依据。
   //
-  // 单元名往下传，不让 runDelete 再读一次 .service：那个文件 runner 属主自己就能改写，两次读
-  // 之间被换掉的话，我们会去停一个「没锁住的」单元，而锁住的那个还活着，紧接着目录就被删了。
-  // 这里读到的这一份既是锁的依据，也必须是后续动作的依据。
-  return withRunnerLock(keys, "delete", () => runDelete(dir, opts, lockedService));
+  // 读不出来（权限、EIO）就拒绝删除：拿不到单元名就占不上那把锁，等于在毫无保护的情况下开删。
+  // 与上面几道守卫一样，把原始错误包一层，说清楚是「因为这个」才不删的。
+  const backend = backendFor(resolveSupervisor(dir, readMarker(dir)));
+  let target: SupervisorTarget | undefined;
+  try {
+    target = backend.prepare?.(dir);
+  } catch (err: unknown) {
+    throw new Error(`解析托管目标失败，拒绝删除: ${errText(err)}`);
+  }
+  // 删除期间挡住同一个 runner 的置备与启停（原因见 runner_lock 顶部）。目录那把锁永远占，
+  // 其余由后端贡献（systemd 占单元名）：provision 只按目录进来，老 panel 的启停只按单元名
+  // 进来，各挡一条路。
+  return withRunnerLock([dirKey(dir), ...(target?.lockKeys ?? [])], "delete", () =>
+    runDelete(dir, opts, backend, target)
+  );
 }
 
 // 删除本体。进来时已在锁内、目录也已校验过。
-// service 是 deleteRunner 加锁时读到并校验过的单元名（空串 = 没装服务/名字不合法）。
+// backend / target 是 deleteRunner 解析好的托管方式与动作依据，本函数不再自己读 .service。
 async function runDelete(
   dir: string,
   opts: DeleteRunnerOptions,
-  service: string
+  backend: RunnerSupervisor,
+  target?: SupervisorTarget
 ): Promise<DeleteResult> {
   const steps: DeleteStep[] = [];
 
@@ -708,20 +715,33 @@ async function runDelete(
   if (busy.has(dir) && !opts.force)
     throw new Error("该 runner 正在跑 job，删除会中断 CI；确认后加 force 重试");
 
-  // 1) 停 + 卸 systemd。先自己把服务停稳，再调 uninstall——理由见 stopBeforeUninstall。
-  //    停不下来就不进 uninstall：拿 stop 的失败原因直接走下面那条中止分支，语义一样（systemd
-  //    没停下来），但错误文案说得出是「等了多久还没停」，而不是一句和权限问题撞车的超时。
-  const stop = await stopBeforeUninstall(service);
-  const uninstall = stop.ok ? await uninstallSystemdService(dir) : stop;
+  // 1) 从托管方手里收回这个 runner。由后端负责「先停稳、再拆」：systemd 仍是自己等停稳再调
+  //    助手 uninstall（顺序与等待期限都没变，单元名取自 target），process 走停止阶梯并清掉
+  //    运行时状态，none 复核完 /proc 就回 ok。
+  //
+  //    与改造前的关键差别：**「没有需要拆的东西」现在算成功**。此前无论装没装过服务都会去调
+  //    一次助手，容器节点上没有 sudo，ENOENT 被判成 failed，于是一个压根没装过服务的 runner
+  //    也走进了下面那条 fail closed 分支 —— 结果是它一旦被纳管就永远删不掉。
+  //
+  //    但「没托管过」不等于「没东西在跑」：各后端的 detach 内部都先向 /proc 复核过活体，
+  //    少了那道复核，下面这条 fail closed 就形同虚设。
+  const label = $t("TXT_CODE_RUNNER_DELETE_STEP_SUPERVISOR");
+  // detach 的契约是回 { ok, error, hint }，但它内部会碰助手与 /proc，两者都可能抛（助手起不来、
+  // hidepid 下读不动）。让异常穿出去的话，整条删除以一个裸错误 reject：前端拿不到 steps、
+  // 拿不到 hint，看到的又是那个「卡在第一步、什么也没说」的老样子 —— 正是这次要消灭的形状。
+  // 抛出来一律按「没能收回托管」处理，后续步骤照旧跳过（fail closed 不变）。
+  const detached = await backend
+    .detach(dir, target)
+    .catch((err: unknown) => ({ ok: false, error: errText(err), hint: undefined }));
   steps.push(
-    uninstall.ok
-      ? { key: "systemd", label: "停止并卸载 systemd 服务", status: "ok" }
+    detached.ok
+      ? { key: "systemd", label, status: "ok" }
       : {
           key: "systemd",
-          label: "停止并卸载 systemd 服务",
+          label,
           status: "failed",
-          detail: uninstall.error,
-          hint: `sudo /usr/local/sbin/ci-panel-runner-svc uninstall ${dir}`
+          detail: detached.error,
+          hint: detached.hint || detachHint(backend.kind)
         }
   );
 
@@ -731,23 +751,21 @@ async function runDelete(
   // 重启它。宁可原样留着让人处置，也不留下这种半删状态。
   // 刻意不看 opts.force：那个标志的含义是「中断正在跑的 job」，批量删除时只要选中的 runner
   // 里有一个 busy 前端就会带上它，拿它给这里开口子等于在最该拦的场景下失效。
-  if (!uninstall.ok) {
-    for (const [key, label] of [
-      ["github", "从 GitHub 注销"],
-      ["panel", "清理面板句柄实例与纳管标记"],
-      ["dir", "删除 runner 目录"]
+  if (!detached.ok) {
+    for (const [key, stepLabel] of [
+      ["github", $t("TXT_CODE_RUNNER_DELETE_STEP_GITHUB")],
+      ["panel", $t("TXT_CODE_RUNNER_DELETE_STEP_PANEL")],
+      ["dir", $t("TXT_CODE_RUNNER_DELETE_STEP_DIR")]
     ] as const)
       steps.push({
         key,
-        label,
+        label: stepLabel,
         status: "skipped",
-        detail: "systemd 服务没能停下来，后续步骤全部跳过，避免删掉一个还在运行的 runner",
-        hint: `先手动停：sudo /usr/local/sbin/ci-panel-runner-svc uninstall ${dir}；确认 systemctl status 已停止后再重试删除`
+        detail: $t("TXT_CODE_RUNNER_DELETE_SKIPPED_NOT_STOPPED"),
+        hint: detached.hint || detachHint(backend.kind)
       });
     const warnings = steps.filter((s) => s.status !== "ok").map((s) => `${s.label}：${s.detail}`);
-    logger.warn(
-      `[runner-delete] ${dir} 中止：systemd 未能停止（${uninstall.error || "未知原因"}）`
-    );
+    logger.warn(`[runner-delete] ${dir} 中止：未能收回托管（${detached.error || "未知原因"}）`);
     return { dir, ok: false, steps, warnings };
   }
 
@@ -756,10 +774,10 @@ async function runDelete(
     const r = await removeGithubRegistration(dir, opts.removeToken, opts.proxy);
     steps.push(
       r.ok
-        ? { key: "github", label: "从 GitHub 注销", status: "ok" }
+        ? { key: "github", label: $t("TXT_CODE_RUNNER_DELETE_STEP_GITHUB"), status: "ok" }
         : {
             key: "github",
-            label: "从 GitHub 注销",
+            label: $t("TXT_CODE_RUNNER_DELETE_STEP_GITHUB"),
             status: "failed",
             detail: r.error,
             hint: `在 runner 目录执行：cd ${dir} && ./config.sh remove --token <删除token>；或到 GitHub 仓库 Settings → Actions → Runners 手动移除`
@@ -768,7 +786,7 @@ async function runDelete(
   } else {
     steps.push({
       key: "github",
-      label: "从 GitHub 注销",
+      label: $t("TXT_CODE_RUNNER_DELETE_STEP_GITHUB"),
       status: "skipped",
       detail: "未取得删除 token（该仓库可能没配 PAT）",
       hint: "到 GitHub 仓库 Settings → Actions → Runners 手动移除该 runner"
@@ -787,11 +805,11 @@ async function runDelete(
       }
     }
     removeMarker(dir);
-    steps.push({ key: "panel", label: "清理面板句柄实例与纳管标记", status: "ok" });
+    steps.push({ key: "panel", label: $t("TXT_CODE_RUNNER_DELETE_STEP_PANEL"), status: "ok" });
   } catch (err: any) {
     steps.push({
       key: "panel",
-      label: "清理面板句柄实例与纳管标记",
+      label: $t("TXT_CODE_RUNNER_DELETE_STEP_PANEL"),
       status: "failed",
       detail: err?.message || String(err)
     });
@@ -802,11 +820,11 @@ async function runDelete(
   try {
     await fs.remove(dir);
     dirRemoved = true;
-    steps.push({ key: "dir", label: "删除 runner 目录", status: "ok" });
+    steps.push({ key: "dir", label: $t("TXT_CODE_RUNNER_DELETE_STEP_DIR"), status: "ok" });
   } catch (err: any) {
     steps.push({
       key: "dir",
-      label: "删除 runner 目录",
+      label: $t("TXT_CODE_RUNNER_DELETE_STEP_DIR"),
       status: "failed",
       detail: err?.message || String(err),
       hint: `rm -rf ${dir}`
@@ -817,34 +835,9 @@ async function runDelete(
     .filter((s) => s.status !== "ok")
     .map((s) => `${s.label}：${s.detail || s.status}`);
   logger.info(
-    `[runner-delete] ${dir}（systemd=${uninstall.ok} 实例=${instanceRemoved} 目录=${dirRemoved}）`
+    `[runner-delete] ${dir}（托管=${backend.kind}/${detached.ok} 实例=${instanceRemoved} 目录=${dirRemoved}）`
   );
   return { dir, ok: dirRemoved, steps, warnings };
-}
-
-// ---- 过渡期的薄壳：按单元名启停 ----
-//
-// 启停本体已经搬进 supervisor/systemd.ts（连同 --no-block + 自己轮询、isSettled 比对 since、
-// 助手错误三分类）。面板下发的启停一律走 supervisor/resolve.ts 的 controlRunner —— 它按目录
-// 寻址、以 .cipanel 为授权依据、在锁内过一次归属闸门。
-//
-// 这里留下的只有一条按单元名进来的路：置备写完初始 drop-in 之后要重启一次单元使其生效，
-// 那一刻 .cipanel 还没写，controlRunner 会（正确地）判它「未纳管」。第 5 步把置备改走后端的
-// attach 之后，本函数与它的调用方一起删。
-export async function controlService(
-  service: string,
-  action: SupervisorAction
-): Promise<{ settled: boolean }> {
-  // 复用 resolve.ts 的收窄函数，不再抄一份动作字面量：那边的表由
-  // satisfies Record<SupervisorAction, true> 钉住完备性，协议新增一个动作时会当场编译失败，
-  // 而抄在这里的字面量只会静默地不放行新动作。
-  if (!isSupervisorAction(action))
-    throw new Error($t("TXT_CODE_RUNNER_ACTION_UNSUPPORTED", { action }));
-  // 助手会再校验一次（那次才是有效的边界）；这里挡住明显非法值，省一次 sudo 往返
-  if (!SERVICE_RE.test(service))
-    throw new Error($t("TXT_CODE_RUNNER_SERVICE_NAME_INVALID", { service }));
-  // 与 deleteRunner 互斥：删除窗口里的 restart 会把刚被卸掉的单元重新拉起来，而目录随后就没了
-  return withRunnerLock([serviceKey(service)], "service", () => runUnitAction(service, action));
 }
 
 // 老 panel 只发得出单元名（新的发 dir）。反查出目录，让两条路最终都汇到 controlRunner 那个

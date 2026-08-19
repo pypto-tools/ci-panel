@@ -1,7 +1,9 @@
 // CI Panel 扩展：一键 provision 一个 GitHub Actions self-hosted runner。
-// 流程：解压安装包 → config.sh 注册到 GitHub → 装 systemd 服务并启动 → 建「句柄实例」。
+// 流程：解压安装包 → 落纳管关系（.cipanel + 句柄实例）→ config.sh 注册到 GitHub →
+// 交给托管后端拉起。纳管关系刻意排在最前：此后任何一步失败，这个 runner 在面板里仍然
+// 看得见、点得动删除，而不是只存在于 GitHub 上。
 //
-// 托管方式只有 systemd 一条路：开机自启、崩溃自拉起、不随 daemon 重启掉线。
+// 托管方式由后端决定（systemd 单元 / daemon 自己 fork），见 service/supervisor/。
 // 面板这边的实例只是「句柄」——给文件管理/配置/详情页当抓手（那些接口都按 instanceUuid
 // 授权、根在实例 cwd），它不带启动命令、永远不跑 runner，以免和 systemd 双跑抢同一个
 // GitHub 身份。（早期版本是 daemon 把 run.sh 当子进程托管，已废弃。）
@@ -16,11 +18,14 @@ import axios from "axios";
 const execFileAsync = promisify(execFile);
 import InstanceSubsystem from "./system_instance";
 import logger from "./log";
+import { $t } from "../i18n";
 import { writeMarker, readMarker } from "./runner_marker";
 // runner_scan 也引本模块，这里构成一个环。安全：module 是 commonjs，命名导入编译成
 // 调用点属性访问（tsc 与 webpack 打包皆然），而两侧都只在函数体里运行时相互调用、
 // 不在模块作用域求值，所以不会踩到上面第 22 行说的那类初始化顺序问题。
-import { assertUnderRoots, controlService, readServiceName } from "./runner_scan";
+import { assertUnderRoots, readServiceName } from "./runner_scan";
+import { backendFor } from "./supervisor/registry";
+import { resolveSupervisor } from "./supervisor/resolve";
 import { dirKey, withRunnerLock } from "./runner_lock";
 import {
   formatEnvLines,
@@ -99,8 +104,7 @@ export function previewDefaultDotEnv(proxy?: string): DefaultDotEnvPreview {
   // 这个值会被回显进环境变量预览，所以长度和空白都要在用它之前查掉：几 MB 的字符串会顺着
   // socket 走一圈，而带换行的值在环境变量语境里从来就不是「一个值」。
   const raw = String(proxy ?? "").trim();
-  if (raw.length > MAX_PROXY_ARG_LEN)
-    throw new Error(`代理地址过长(上限 ${MAX_PROXY_ARG_LEN})`);
+  if (raw.length > MAX_PROXY_ARG_LEN) throw new Error(`代理地址过长(上限 ${MAX_PROXY_ARG_LEN})`);
   if (/\s/.test(raw)) throw new Error("代理地址不能包含空白字符");
   const resolved = resolveProxy(raw);
   const panel = proxyDotEnvVars(resolved);
@@ -284,16 +288,14 @@ export async function provisionRunner(params: ProvisionRunnerParams) {
 // 置备本体。进来时已在锁内，targetDir 已规范化并校验过。
 // 刻意用 Omit 去掉 params.targetDir：那是调用方原样传进来、还没规范化的值，而它决定了
 // assertBaseDirRepo 的基目录与解压落点——留在类型里迟早有人顺手用错一个。
-async function runProvision(
-  params: Omit<ProvisionRunnerParams, "targetDir">,
-  targetDir: string
-) {
+async function runProvision(params: Omit<ProvisionRunnerParams, "targetDir">, targetDir: string) {
   const { repoUrl, token, name } = params;
   const labels = (params.labels || "").trim();
   const proxy = resolveProxy(params.proxy);
 
   // ---- 校验 ----
-  if (!repoUrl || !/^https?:\/\/.+/.test(repoUrl)) throw new Error("仓库地址无效（需 http/https URL）");
+  if (!repoUrl || !/^https?:\/\/.+/.test(repoUrl))
+    throw new Error("仓库地址无效（需 http/https URL）");
   if (!token) throw new Error("注册 token 不能为空");
   if (!name) throw new Error("runner 名称不能为空");
   assertBaseDirRepo(path.dirname(targetDir), repoUrl); // 一个基目录只归一个仓库
@@ -311,17 +313,48 @@ async function runProvision(
     step("解压安装包");
     logger.info(`[runner-provision] 解压安装包 ${pkg} 到 ${targetDir}`);
     const r = await run("tar", ["xzf", pkg, "-C", targetDir], {});
-    if (r.code !== 0)
-      throw new ProvisionError(`解压失败: ${r.output.slice(-500)}`, r.output);
+    if (r.code !== 0) throw new ProvisionError(`解压失败: ${r.output.slice(-500)}`, r.output);
   } else {
     step("安装包已就绪");
   }
+
+  // ---- 1.5) 先把纳管关系落下来，再去碰 GitHub ----
+  // 面板要看得见一个 runner，需要两样东西同时存在：.cipanel（纳管关系的真相源）与句柄实例
+  // （已纳管目录是遍历实例 cwd 再用 .cipanel 过滤出来的）。此前两者都排在装服务之后，于是装
+  // 服务那一步一抛，GitHub 上已经有了身份、本地却两样都没有 —— 这个 runner 在面板里根本不
+  // 存在，只能从导入弹窗里捡回来再删。
+  //
+  // 前移之后，此后任何一步失败都留下一个「面板里看得见、点得动删除」的条目：它的 exists 为
+  // false（缺 .runner），列表已有的 exists / broken 字段就能表达这个状态，不需要给 marker 加
+  // 什么「置备中」的标记。两个函数本来就幂等（writeMarker 保留已有的 id/source/managedSince，
+  // ensureHandleInstance 已有就复用），所以重跑一次置备没有副作用。
+  const marker = writeMarker(targetDir, {
+    source: "provision",
+    repo: repoSlug(repoUrl),
+    group: (params.group || "").trim(),
+    labels: (params.labels || "").trim(),
+    // 托管意图此刻定死并落盘。不能每次从节点能力现推：特权助手哪天坏了，推断结果就会翻成另一
+    // 个后端，daemon 会在一个单元还活着的目录里再拉起一个 listener，两个进程抢同一个身份。
+    //
+    // 与两条纳管路径同一个拼法（resolveSupervisor(dir, null)），不是 nodeDefaultSupervisor()：
+    // 重跑置备时目标目录可能已经带着 .service（alreadyConfigured 那条分支），而此刻助手若正好
+    // 坏着，节点默认会回 process 并被永久钉死（writeMarker 不覆盖已有的 supervisor）——那正是
+    // 「单元还活着，旁边再拉一个 listener」。装过单元的目录必须认 systemd。
+    // 全新目录此时还没有 .service，两种拼法结果一致。
+    supervisor: resolveSupervisor(targetDir, null)
+  });
+  step("创建句柄实例");
+  const instanceUuid = ensureHandleInstance(targetDir, repoSlug(repoUrl), name);
 
   // ---- 2) 代理 + 用户填的初始变量写入 <dir>/.env（actions-runner 运行时读取；供 run.sh 上线用）----
   // 在 config.sh 之前写完，所以第一个 job 就带着这些变量跑，不需要先建好再改一遍。
   // 同名以用户填的为准（sanitizeEnvVars 里后者覆盖前者）：代理那四条只是默认值。
   const childEnv: NodeJS.ProcessEnv = { ...process.env };
   const dotenvVars = sanitizeEnvVars([...proxyDotEnvVars(proxy), ...(params.envDotenv || [])]);
+  // listener 那一份也在这里就校验掉。它真正被写下去要等第 4.5 步，但 sanitizeEnvVars 会对非法
+  // 变量名/带换行的值/超长值抛错——留到那时才抛，runner 已经注册进 GitHub、listener 也已经拉
+  // 起来了，一个手滑的变量名换来的是「置备失败但东西全在」这种最难收拾的半成品。
+  const listenerVars = sanitizeEnvVars(params.envOverride || []);
   if (dotenvVars.length) writeDotEnvFile(targetDir, dotenvVars);
   if (proxy) {
     childEnv.HTTP_PROXY = childEnv.HTTPS_PROXY = childEnv.ALL_PROXY = proxy;
@@ -333,7 +366,18 @@ async function runProvision(
   if (!alreadyConfigured) {
     step("注册到 GitHub");
     logger.info(`[runner-provision] 注册 runner ${name} → ${repoUrl}`);
-    const args = ["--url", repoUrl, "--token", token, "--name", name, "--work", "_work", "--unattended", "--replace"];
+    const args = [
+      "--url",
+      repoUrl,
+      "--token",
+      token,
+      "--name",
+      name,
+      "--work",
+      "_work",
+      "--unattended",
+      "--replace"
+    ];
     if (labels) args.push("--labels", labels);
 
     // 代理连 GitHub CDN 常被中途重置（response ended / reset / TLS 等）。这类是暂时性错误，
@@ -380,40 +424,32 @@ async function runProvision(
     step("已注册（跳过）");
   }
 
-  // ---- 4) 装 systemd 服务并启动（生产托管方式：开机自启、崩溃自拉起、不随 daemon 重启掉线）----
-  // 取代旧的「面板当子进程跑 run.sh」。面板这边只留一个句柄实例，给文件管理/配置/详情页用，不托管。
-  step("安装 systemd 服务");
-  await installSystemdService(targetDir);
+  // ---- 4) 交给托管后端 ----
+  // systemd 节点装单元并 enable --now；无 systemd 的节点记下期望态并把 run.sh 拉起来。
+  // 面板这边只留一个句柄实例，给文件管理/配置/详情页用，它不带启动命令、永远不跑 runner。
+  //
+  // attach 的契约是「成功即在跑」，所以这里不需要再补一次 start；它也**不走 controlRunner**，
+  // 那道归属闸门管不到它，防重复拉起由各后端 attach 内部自己保证（systemd 靠助手对已存在单元
+  // 的拒绝，process 靠 spawn 前那次 /proc 复核）。
+  step($t("TXT_CODE_RUNNER_PROVISION_STEP_SUPERVISOR"));
+  const backend = backendFor(resolveSupervisor(targetDir, marker));
+  await backend.attach(targetDir);
+  // attach 之后才解析动作依据：systemd 下单元名要等助手把 .service 写完才定得下来
+  const target = backend.prepare?.(targetDir);
 
-  // ---- 4.5) 初始的 systemd 环境变量（drop-in）----
-  // 必须排在装服务之后：单元名要等助手写下 <dir>/.service 才定得下来。而助手的 install 用的是
-  // `enable --now`，监听进程在 drop-in 落盘前就已经起来了，所以写完要重启一次才真正生效。
-  // 位置刻意压在写 .cipanel 标记之前：此刻这个 runner 还没进面板的扫描结果，不会有并发的启停
-  // 来抢同一个单元。失败按整项失败处理——一个装好却连不上 GitHub（代理没进监听进程）的 runner，
-  // 比一个明确失败、可以点「重试失败项」重跑的更难收拾。
-  const overrideVars = sanitizeEnvVars(params.envOverride || []);
-  if (overrideVars.length) {
-    step("写入 systemd 环境变量");
-    await setServiceEnv(targetDir, overrideVars);
-    step("重启单元使环境变量生效");
-    const service = readServiceName(targetDir);
-    if (!service) throw new Error("装完服务却读不到 .service，无法重启使环境变量生效");
-    await controlService(service, "restart");
+  // ---- 4.5) 初始的监听进程环境变量（代理必须进这里，.env 只进 job/step）----
+  // 必须排在 attach 之后：systemd 下单元名要等助手写下 <dir>/.service 才定得下来，而 attach
+  // 用的是 enable --now，监听进程在这些变量落盘之前就已经起来了，所以写完要重启一次才生效。
+  // 失败按整项失败处理——一个装好却连不上 GitHub（代理没进监听进程）的 runner，比一个明确
+  // 失败、可以点「重试失败项」重跑的更难收拾。
+  if (listenerVars.length) {
+    step($t("TXT_CODE_RUNNER_PROVISION_STEP_ENV_WRITE"));
+    await backend.writeListenerEnv(targetDir, listenerVars, target);
+    step($t("TXT_CODE_RUNNER_PROVISION_STEP_ENV_RESTART"));
+    await backend.restart(targetDir, target);
   }
 
-  // 写 .cipanel 标记：面板创建的 runner，来源 provision，纳入日常展示
-  const marker = writeMarker(targetDir, {
-    source: "provision",
-    repo: repoSlug(repoUrl),
-    group: (params.group || "").trim(),
-    labels: (params.labels || "").trim()
-  });
-
-  // 句柄实例：只作文件管理/配置的抓手，不跑 run.sh（systemd 在跑）
-  step("创建句柄实例");
-  const instanceUuid = ensureHandleInstance(targetDir, repoSlug(repoUrl), name);
-
-  logger.info(`[runner-provision] 完成: systemd 服务 + 句柄实例 ${instanceUuid} (${name})`);
+  logger.info(`[runner-provision] 完成: ${backend.kind} 托管 + 句柄实例 ${instanceUuid} (${name})`);
   return {
     instanceUuid,
     nickname: name,
@@ -849,16 +885,14 @@ export function listRepoGroups(baseDir: string, repoUrl: string): RepoLabelGroup
     const key = labelKey(m.labels);
     if (!key) continue;
     const prefix = m.group || path.basename(dir).replace(/-\d+$/, "");
-    const g =
-      byKey.get(key) ??
-      {
-        key,
-        labels: m.labels,
-        prefix,
-        count: 0,
-        maxIndex: maxIndexFor(prefix, used),
-        freeIndexes: freeIndexesFor(prefix, used)
-      };
+    const g = byKey.get(key) ?? {
+      key,
+      labels: m.labels,
+      prefix,
+      count: 0,
+      maxIndex: maxIndexFor(prefix, used),
+      freeIndexes: freeIndexesFor(prefix, used)
+    };
     g.count += 1;
     byKey.set(key, g);
   }
@@ -931,7 +965,8 @@ function expandBatchSpecs(p: ProvisionBatchParams): {
   const proxy = (p.proxy || "").trim();
   const baseDir = path.normalize(p.baseDir || "");
 
-  if (!repoUrl || !/^https?:\/\/.+/.test(repoUrl)) throw new Error("仓库地址无效（需 http/https URL）");
+  if (!repoUrl || !/^https?:\/\/.+/.test(repoUrl))
+    throw new Error("仓库地址无效（需 http/https URL）");
   if (!token) throw new Error("注册 token 不能为空");
   if (!path.isAbsolute(baseDir) || baseDir === "/")
     throw new Error("基目录必须是绝对路径且不能为根目录 /");
@@ -974,9 +1009,10 @@ function expandBatchSpecs(p: ProvisionBatchParams): {
 }
 
 // 同步批量（保留：一次性阻塞返回全部结果）
-export async function provisionRunnerBatch(
-  p: ProvisionBatchParams
-): Promise<{ results: BatchItemResult[]; aligned: { baseName: string; labels: string; prefix: string }[] }> {
+export async function provisionRunnerBatch(p: ProvisionBatchParams): Promise<{
+  results: BatchItemResult[];
+  aligned: { baseName: string; labels: string; prefix: string }[];
+}> {
   const { repoUrl, token, proxy, specs, aligned } = expandBatchSpecs(p);
   logger.info(`[runner-provision] 批量: 共 ${specs.length} 个 runner`);
   const results: BatchItemResult[] = [];
@@ -1086,9 +1122,11 @@ async function runBatchItems(id: string, token: string, indices: number[]) {
 }
 
 // 启动后台批量，立刻返回 batchId + 初始清单
-export function startRunnerBatch(
-  p: ProvisionBatchParams
-): { batchId: string; items: { name: string }[]; aligned: { baseName: string; labels: string; prefix: string }[] } {
+export function startRunnerBatch(p: ProvisionBatchParams): {
+  batchId: string;
+  items: { name: string }[];
+  aligned: { baseName: string; labels: string; prefix: string }[];
+} {
   const { repoUrl, token, proxy, specs, aligned } = expandBatchSpecs(p);
   const id = `b${++batchSeq}`;
   const items: BatchItemState[] = specs.map((s) => ({
@@ -1129,7 +1167,9 @@ export function retryFailedBatch(
   if (!st) throw new Error("批量任务不存在（可能已过期），请重新创建");
   if (!token || !String(token).trim()) throw new Error("重试需要提供注册 token");
   if (proxy !== undefined) st.proxy = resolveProxy(proxy);
-  const failedIdx = st.items.map((it, i) => (it.status === "failed" ? i : -1)).filter((i) => i >= 0);
+  const failedIdx = st.items
+    .map((it, i) => (it.status === "failed" ? i : -1))
+    .filter((i) => i >= 0);
   if (!failedIdx.length) throw new Error("没有失败项可重试");
   // 先把失败项置回 pending，前端轮询能立刻看到"排队中"
   for (const i of failedIdx) {
@@ -1239,8 +1279,9 @@ export function collectRunners(baseDir: string): CollectResult {
     try {
       // 统一走 ensureHandleInstance：句柄实例只作抓手、不带启动命令（systemd 才跑 runner）
       const instanceUuid = ensureHandleInstance(dir, repo, nickname);
-      // 纳入看护的同时写 .cipanel，让它进入日常展示；来源记为 import（既有 runner 被收编）
-      writeMarker(dir, { source: "import", repo });
+      // 纳入看护的同时写 .cipanel，让它进入日常展示；来源记为 import（既有 runner 被收编）。
+      // 托管意图此刻定死，理由同 registerRunners：不落盘就每次现推，助手坏掉时会翻后端。
+      writeMarker(dir, { source: "import", repo, supervisor: resolveSupervisor(dir, null) });
       managed.add(path.normalize(dir));
       collected.push({ name, instanceUuid, repo });
       logger.info(`[runner-collect] 纳入 ${name} → 实例 ${instanceUuid} (repo=${repo})`);
@@ -1273,10 +1314,7 @@ function cmpVersion(a: string, b: string): number {
 async function fetchLatestRunnerVersion(proxy?: string): Promise<string> {
   const cfg: any = { timeout: 10000, headers: { "User-Agent": "ci-panel" } };
   applyProxy(cfg, proxy);
-  const res = await axios.get(
-    "https://api.github.com/repos/actions/runner/releases/latest",
-    cfg
-  );
+  const res = await axios.get("https://api.github.com/repos/actions/runner/releases/latest", cfg);
   const tag = res.data?.tag_name || ""; // 形如 v2.335.1
   return tag.replace(/^v/, "");
 }
@@ -1404,7 +1442,11 @@ async function headContentLength(url: string, proxy: string): Promise<number> {
 }
 
 // 跑一次 curl（断点续传），返回退出码
-function runCurlResume(url: string, tmp: string, proxy: string): Promise<{ code: number; stderr: string }> {
+function runCurlResume(
+  url: string,
+  tmp: string,
+  proxy: string
+): Promise<{ code: number; stderr: string }> {
   return new Promise((resolve) => {
     // --http1.1 避开代理 HTTP/2 framing 错误(code 92)；-C - 断点续传；-L 跟随重定向
     const args = ["-sL", "--http1.1", "-C", "-", "--max-time", "0", "-A", "ci-panel", "-o", tmp];

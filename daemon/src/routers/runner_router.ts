@@ -30,7 +30,7 @@ import {
 import { controlRunner, isSupervisorAction } from "../service/supervisor/resolve";
 import { $t } from "../i18n";
 import { readRunnerDiag } from "../service/runner_logs";
-import { readRunnerEnv, writeRunnerEnv, type EnvTarget } from "../service/runner_env";
+import { readRunnerEnv, scopeOfTarget, writeRunnerEnv } from "../service/runner_env";
 
 // 扫描磁盘上真实存在的 runner：读 .runner 拿仓库归属，读 .service 查 systemd 状态。
 // 只读，不建实例——跟 runner/collect 的区别就在这里。
@@ -154,21 +154,23 @@ routerApp.on("runner/service_control", async (ctx, data) => {
   }
 });
 
-// 读 runner 两个目标的环境变量（override.conf 与 .env）——均只读、免 sudo
-routerApp.on("runner/env_get", (ctx, data) => {
+// 读 runner 两个作用域的环境变量——均只读、免 sudo。
+// async：listener 那一节由托管后端给（容器/远端后端读它要走 RPC），本地后端仍是同步文件读。
+routerApp.on("runner/env_get", async (ctx, data) => {
   try {
-    protocol.msg(ctx, "runner/env_get", readRunnerEnv(String(data?.dir || "")));
+    protocol.msg(ctx, "runner/env_get", await readRunnerEnv(String(data?.dir || "")));
   } catch (err: any) {
     protocol.error(ctx, "runner/env_get", { err: err?.message || String(err) });
   }
 });
 
-// 设置 runner 某目标的环境变量。target=override 写 systemd drop-in（走特权助手 + daemon-reload）；
-// target=dotenv 直接写 <dir>/.env。两者都不重启；生效由面板另走 service_control 的 restart。
+// 设置 runner 某作用域的环境变量。线上取值 override / dotenv 在这里映射成内部的
+// listener / job，**认不出的值直接抛**：老 daemon 那句 `=== "dotenv" ? … : "override"` 会把
+// 任何陌生值归成 override，于是只该进 job 的变量被写进 root 拥有的 drop-in，还泄进监听进程。
+// 两者都不重启；生效由面板另走 service_control 的 restart。
 routerApp.on("runner/env_set", async (ctx, data) => {
   try {
-    const target: EnvTarget = data?.target === "dotenv" ? "dotenv" : "override";
-    const result = await writeRunnerEnv(String(data?.dir || ""), target, {
+    const result = await writeRunnerEnv(String(data?.dir || ""), scopeOfTarget(data?.target), {
       upsert: data?.upsert,
       remove: data?.remove,
       replace: Boolean(data?.replace)

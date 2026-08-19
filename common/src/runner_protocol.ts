@@ -133,6 +133,29 @@ export interface ScannedRunner {
   managedBy?: "systemd" | "both" | "none";
 }
 
+// ---- 仓库视角的 runner 引用 ----
+// panel 把各节点的扫描结果聚合成「某个仓库在所有节点上的 runner」，前端仓库页渲染它。
+// 之前 panel 与 frontend 各手写一份，而 frontend 那份不引 common —— 于是 panel 改字段时
+// 编译器一声不吭，前端的孤儿/冲突统计悄悄归零。这里写一份，两边都用它。
+export interface RepoRunnerRef {
+  daemonId: string;
+  nodeName: string;
+  dir: string;
+  dirName: string;
+  agentName: string; // runner 在 GitHub 上的名字，未必等于目录名
+  supervisor: SupervisorKind; // 意图
+  runtime: RunnerRuntimeState | null; // 观测。老 daemon 的载荷里没有，为 null
+  managed: boolean; // 有合法 .cipanel。启停守卫要用它
+  running: boolean; // = runtime?.running，留给列表排序与计数直接用
+  busy: boolean; // 正在跑 job —— 停它会中断 CI
+  since: string;
+  instanceUuid: string; // 句柄实例，文件管理与详情页按它授权
+  source: RunnerSource | "";
+  group: string;
+  markerId: string;
+  broken?: string;
+}
+
 // ---- 环境变量的两个作用域 ----
 // 线上取值刻意不改名（"override" / "dotenv"）：老 daemon 的路由层把认不出的值一律归一成
 // "override"，于是新 frontend 发一个新名字过去，只该进 job 的变量会被静默写进 root 拥有的

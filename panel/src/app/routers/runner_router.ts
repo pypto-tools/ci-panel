@@ -200,7 +200,11 @@ router.post(
       ensureRepoRegistered((config as any)?.repoUrl);
       const remoteService = RemoteServiceSubsystem.getInstance(daemonId);
       // config.sh 注册可能耗时数十秒，给足超时
-      const result = await new RemoteRequest(remoteService).request("runner/provision", config, 180000);
+      const result = await new RemoteRequest(remoteService).request(
+        "runner/provision",
+        config,
+        180000
+      );
       ctx.body = result;
     } catch (err) {
       ctx.body = err;
@@ -664,7 +668,9 @@ router.post(
         replace?: boolean;
         concurrency?: number;
       };
-      const dirs = (Array.isArray(body.dirs) ? body.dirs : []).map((d) => String(d)).filter(Boolean);
+      const dirs = (Array.isArray(body.dirs) ? body.dirs : [])
+        .map((d) => String(d))
+        .filter(Boolean);
       const remoteService = RemoteServiceSubsystem.getInstance(daemonId);
 
       const results = await mapWithConcurrency(
@@ -674,7 +680,13 @@ router.post(
           try {
             const r = await new RemoteRequest(remoteService).request(
               "runner/env_set",
-              { dir, target: body.target, upsert: body.upsert, remove: body.remove, replace: body.replace },
+              {
+                dir,
+                target: body.target,
+                upsert: body.upsert,
+                remove: body.remove,
+                replace: body.replace
+              },
               90000
             );
             // ...r 在前：RunnerEnvResult 自带规范化过的 dir，展开在后会覆盖请求用的 dir，
@@ -718,8 +730,8 @@ router.post(
 );
 
 // [Top-level Permission]
-// 批量启停/重启 systemd 托管的 runner。每个独立、无共享锁，panel 侧有界并发扇出到单个
-// service_control；无 service 的项直接跳过。逐个 catch 汇总结果，互不影响。
+// 批量启停/重启 runner。每个独立、无共享锁，panel 侧有界并发扇出到单个 service_control；
+// 没有目录的项直接跳过。逐个 catch 汇总结果，互不影响。
 router.post(
   "/service_control_batch",
   permission({ level: ROLE.ADMIN }),
@@ -737,9 +749,9 @@ router.post(
         ctx.body = { results: [], error: "invalid action" };
         return;
       }
-      const items = (Array.isArray(body.items) ? body.items : []).filter(
-        (it) => it && it.service
-      ); // 无 service 的不发（面板管不了它的启停）
+      // 按目录过滤，不按单元名：单元名是 systemd 的实现细节，别的托管方式没有它却照样能启停。
+      // 按 service 过滤会把那些项静默丢掉 —— 用户点了批量启动，既没反应也没有错误。
+      const items = (Array.isArray(body.items) ? body.items : []).filter((it) => it && it.dir);
       const remoteService = RemoteServiceSubsystem.getInstance(daemonId);
 
       const results = await mapWithConcurrency(
@@ -749,7 +761,10 @@ router.post(
           try {
             const r = await new RemoteRequest(remoteService).request(
               "runner/service_control",
-              { service: it.service, action },
+              // 两个字段都发：dir 是新 daemon 的寻址依据，service 留给还没升级的节点。
+              // 只翻外层过滤器而不翻这里的话，放行的项会带着一个空单元名过去，daemon 在
+              // 「目录必须是绝对路径」那一句抛错，逐项失败且失败原因看起来毫无道理。
+              { dir: it.dir, service: it.service, action },
               90000
             );
             return { dir: it.dir, service: it.service, ok: true, ...r };

@@ -1381,5 +1381,7 @@
   "TXT_CODE_RUNNER_DETACH_HINT_PROCESS": "请在节点上停掉该 runner 的进程组（kill -INT -<pgid>）后重试。",
   "TXT_CODE_RUNNER_DELETE_STEP_SUPERVISOR": "停止并从托管方收回",
   "TXT_CODE_RUNNER_PROVISION_STEP_SUPERVISOR": "交给托管方",
-  "TXT_CODE_RUNNER_ENV_TARGET_UNKNOWN": "未知的环境变量作用域：{{target}}。"
+  "TXT_CODE_RUNNER_ENV_TARGET_UNKNOWN": "未知的环境变量作用域：{{target}}。",
+  "TXT_CODE_RUNNER_UNIT_NOT_FOUND": "没有任何纳管目录对应单元 {{service}}。",
+  "TXT_CODE_RUNNER_UNIT_FAILED": "systemd 单元处于 failed 状态（{{subState}}）。"
 }

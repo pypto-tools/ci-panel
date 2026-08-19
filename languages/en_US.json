@@ -1381,5 +1381,7 @@
   "TXT_CODE_RUNNER_DETACH_HINT_PROCESS": "Stop the runner process group on the node (kill -INT -<pgid>), then retry.",
   "TXT_CODE_RUNNER_DELETE_STEP_SUPERVISOR": "Stop and detach from the supervisor",
   "TXT_CODE_RUNNER_PROVISION_STEP_SUPERVISOR": "Hand over to the supervisor",
-  "TXT_CODE_RUNNER_ENV_TARGET_UNKNOWN": "Unknown environment variable scope: {{target}}."
+  "TXT_CODE_RUNNER_ENV_TARGET_UNKNOWN": "Unknown environment variable scope: {{target}}.",
+  "TXT_CODE_RUNNER_UNIT_NOT_FOUND": "No managed runner directory owns the unit {{service}}.",
+  "TXT_CODE_RUNNER_UNIT_FAILED": "The systemd unit is in the failed state ({{subState}})."
 }

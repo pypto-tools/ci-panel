@@ -157,8 +157,14 @@ describe("readRunnerEnv enforces the boundary end to end", () => {
     // .service is attacker-writable if the runner account is compromised; reading it must fail
     // loudly instead of feeding the value to systemctl or to a path join. That file is also what
     // makes this directory resolve to the systemd backend, so the refusal comes from there now.
+    //
+    // The message is localized now that the refusal comes from the backend, and the suite runs
+    // in en_us, so both wordings are accepted: what is under test is that it refuses and names
+    // the value, not which catalogue the sentence came from.
     fs.writeFileSync(path.join(runnerDir, ".service"), "../../etc/evil.service");
-    await expect(readRunnerEnv(runnerDir)).rejects.toThrow(/非法的服务名/);
+    await expect(readRunnerEnv(runnerDir)).rejects.toThrow(
+      /非法的服务名|Invalid systemd unit name/
+    );
   });
 
   it("treats an absent .service as 'no unit installed', not as an error", async () => {

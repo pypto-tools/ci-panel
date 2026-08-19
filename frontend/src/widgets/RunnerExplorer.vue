@@ -43,6 +43,16 @@ import {
 } from "@/services/apis/runner";
 import DeleteResultView from "./DeleteResultView.vue";
 import { remoteNodeList } from "@/services/apis";
+import { t } from "@/lang/i18n";
+import {
+  canControl,
+  kindLabel,
+  ownershipHint,
+  ownershipTag,
+  serviceOf,
+  shouldWarnConflict
+} from "@/tools/supervisor";
+import type { SupervisorAction } from "mcsmanager-common";
 
 defineProps<{
   card: LayoutCard;
@@ -86,8 +96,9 @@ function summarizeRunners(
     total: runners.length,
     running: runners.filter((r) => r.running).length,
     busy: runners.filter((r) => r.busy).length,
-    orphaned: runners.filter((r) => r.managedBy === "none").length,
-    conflicted: runners.filter((r) => r.managedBy === "both").length
+    orphaned: runners.filter((r) => shouldWarnConflict(r) && r.runtime?.ownership === "foreign")
+      .length,
+    conflicted: runners.filter((r) => r.runtime?.ownership === "conflict").length
   };
 }
 
@@ -197,17 +208,22 @@ onMounted(() => {
 });
 onUnmounted(() => clearInterval(timer));
 
-function statusColor(r: RepoRunner) {
+// a-badge 的 status 只认这五个值，与标签那张表的颜色不是同一套，所以这里显式映射，
+// 不去复用 ownershipTag 的 color。
+type BadgeStatus = "success" | "processing" | "default" | "error" | "warning";
+
+function statusColor(r: RepoRunner): BadgeStatus {
+  // busy 优先：正在跑 job 是这一列最要紧的信息，停它会中断 CI
   if (r.busy) return "processing";
-  if (r.managedBy === "both") return "error";
-  if (r.managedBy === "none") return "warning";
+  if (r.runtime?.ownership === "conflict") return "error";
+  if (shouldWarnConflict(r)) return "warning";
   return r.running ? "success" : "default";
 }
 
 function statusLabel(r: RepoRunner) {
-  if (r.managedBy === "none") return "无人托管";
-  if (r.busy) return "正在跑 job";
-  return r.running ? "空闲待命" : "已停止";
+  if (r.busy) return t("TXT_CODE_RUNNER_BUSY");
+  // 其余一律走归属那张表：托管方式加一种时这里不用改
+  return ownershipTag(r).label;
 }
 
 // systemd 的时间戳形如 "Fri 2026-07-03 11:52:54 CST"，只留日期和时分
@@ -219,12 +235,18 @@ function shortTime(s: string) {
 
 const acting = ref<Record<string, boolean>>({});
 
-async function doControl(r: RepoRunner, action: "start" | "stop" | "restart") {
-  if (!r.service) return message.error("这个 runner 没有 systemd 服务，面板管不了它的启停");
+async function doControl(r: RepoRunner, action: SupervisorAction) {
+  // 与 daemon 侧 assertActionAllowed 同一套规则，理由也由它给出
+  const check = canControl(r, action);
+  if (!check.ok) return message.error(check.reason);
   acting.value[r.dir] = true;
   try {
     const { execute, state } = controlRunnerService();
-    await execute({ params: { daemonId: r.daemonId }, data: { service: r.service, action } });
+    // 过渡期两个字段都发：dir 是新 daemon 的寻址依据，service 留给还没升级的节点
+    await execute({
+      params: { daemonId: r.daemonId },
+      data: { dir: r.dir, service: serviceOf(r), action }
+    });
     // settled=false：systemd 收下了 job 但还没跑到位（多半是这个 runner 停不下来）。
     // 不能报"成功"——它可能几分钟后才真的动，10 秒一轮的刷新会把最终状态显示出来。
     if (state.value?.settled === false) {
@@ -303,14 +325,15 @@ const batchControlling = ref(false);
 function batchControl(action: "stop" | "restart") {
   const sel = selectedRunners.value;
   if (!sel.length) return message.warning("请先勾选 runner");
-  const withSvc = sel.filter((r) => r.service);
+  // 与单个启停共用同一个判定：按「面板能不能管它」筛，而不是按「有没有 systemd 单元」
+  const withSvc = sel.filter((r) => canControl(r, action).ok);
   const skipped = sel.length - withSvc.length;
-  if (!withSvc.length) return message.warning("选中的 runner 都没有 systemd 服务，面板无法启停");
+  if (!withSvc.length) return message.warning(t("TXT_CODE_RUNNER_BATCH_NONE_CONTROLLABLE"));
   const busyCount = withSvc.filter((r) => r.busy).length;
   const label = action === "stop" ? "停止" : "重启";
   const lines = [`将${label}选中的 ${withSvc.length} 个 runner。`];
   if (busyCount > 0) lines.push(`其中 ${busyCount} 个正在跑 job，${label}会当场中断这些 CI 任务！`);
-  if (skipped > 0) lines.push(`另有 ${skipped} 个没有 systemd 服务，将被跳过。`);
+  if (skipped > 0) lines.push(t("TXT_CODE_RUNNER_BATCH_SKIPPED", { count: skipped }));
   Modal.confirm({
     title: `批量${label} ${withSvc.length} 个 runner`,
     icon: () => h(ExclamationCircleOutlined),
@@ -328,7 +351,7 @@ async function doBatchControl(action: "stop" | "restart", withSvc: RepoRunner[],
     await execute({
       params: { daemonId: daemonId.value },
       data: {
-        items: withSvc.map((r) => ({ dir: r.dir, service: r.service as string })),
+        items: withSvc.map((r) => ({ dir: r.dir, service: serviceOf(r) })),
         action
       }
     });
@@ -373,10 +396,12 @@ const envRemoveKeys = ref<string[]>([]);
 const envBatchLoading = ref(false); // 打开弹窗时拉各 runner 现有变量名（供"删除"下拉选项）
 // 各 runner 现有的变量名，按目标分：{ dir: { override: [...], dotenv: [...] } }
 const envKeysByDir = ref<Record<string, { override: string[]; dotenv: string[] }>>({});
-// 目标能落到哪些 runner：override 需要 systemd 服务，无服务的会被跳过；dotenv 每个 runner 都能写。
+// 目标能落到哪些 runner：listener 作用域要托管方能写（外部托管的写不了），job 作用域人人都能写。
 const envBatchTargets = computed(() =>
   envBatchTarget.value === "override"
-    ? selectedRunners.value.filter((r) => r.service)
+    ? // listener 作用域能不能写由托管方式决定，不再看「有没有 systemd 单元」：
+      // 进程托管的节点写 daemon 自己的 env 文件，只有「外部托管」那种写不了
+      selectedRunners.value.filter((r) => r.supervisor !== "none")
     : selectedRunners.value
 );
 // "要删除的变量"下拉选项：当前目标下、所有目标 runner 现有变量名的并集（用户只从存在的里选，不手输新建）
@@ -446,7 +471,7 @@ async function doBatchEnv() {
 
   const targets = envBatchTargets.value;
   if (!targets.length)
-    return message.warning("没有可写入的 runner（override 目标需要 systemd 服务）");
+    return message.warning("没有可写入的 runner（监听进程环境变量需要托管方支持）");
   envBatchSaving.value = true;
   try {
     const { execute, state } = setRunnerEnvBatch();
@@ -797,18 +822,23 @@ const goRepo = (slug: string) =>
             </template>
           </a-table-column>
 
-          <a-table-column key="managedBy" title="托管方式" :width="120">
+          <a-table-column
+            key="supervisor"
+            :title="t('TXT_CODE_RUNNER_COL_SUPERVISOR')"
+            :width="110"
+          >
             <template #default="{ record }">
-              <a-tag v-if="record.managedBy === 'systemd'" color="blue">systemd</a-tag>
-              <a-tag v-else-if="record.managedBy === 'panel'" color="purple">面板实例</a-tag>
-              <a-tooltip
-                v-else-if="record.managedBy === 'both'"
-                title="systemd 和面板都在托管同一个目录，可能跑起两个 Runner.Listener 抢同一个 GitHub 身份"
-              >
-                <a-tag color="error"><WarningOutlined /> 冲突</a-tag>
-              </a-tooltip>
-              <a-tooltip v-else title="既没装 systemd 服务、面板也没托管，没有任何东西会启动它">
-                <a-tag color="warning"><WarningOutlined /> 无人托管</a-tag>
+              <a-tag>{{ kindLabel(record.supervisor) }}</a-tag>
+            </template>
+          </a-table-column>
+
+          <a-table-column key="ownership" :title="t('TXT_CODE_RUNNER_COL_OWNERSHIP')" :width="120">
+            <template #default="{ record }">
+              <a-tooltip :title="ownershipHint(record)">
+                <a-tag :color="ownershipTag(record).color">
+                  <WarningOutlined v-if="shouldWarnConflict(record)" />
+                  {{ ownershipTag(record).label }}
+                </a-tag>
               </a-tooltip>
             </template>
           </a-table-column>
@@ -831,36 +861,45 @@ const goRepo = (slug: string) =>
                 <a-button size="small" type="primary" ghost @click="goDetail(record)">
                   详情
                 </a-button>
-                <template v-if="record.service">
-                  <a-button
-                    v-if="!record.running"
-                    size="small"
-                    type="primary"
-                    :loading="acting[record.dir]"
-                    @click="confirmControl(record, 'start')"
-                  >
-                    启动
-                  </a-button>
-                  <a-button
-                    v-else
-                    size="small"
-                    danger
-                    :loading="acting[record.dir]"
-                    @click="confirmControl(record, 'stop')"
-                  >
-                    停止
-                  </a-button>
-                  <a-button
-                    size="small"
-                    :loading="acting[record.dir]"
-                    :disabled="!record.running"
-                    @click="confirmControl(record, 'restart')"
-                  >
-                    重启
-                  </a-button>
-                </template>
-                <a-tooltip v-else title="没有 systemd 服务，面板无法启停">
-                  <span style="opacity: 0.45">不可启停</span>
+                <!-- 按钮禁用与否、以及为什么禁用，都由 canControl 说了算：与 daemon 侧那道
+                     闸门同一套规则，用户在点下去之前就知道结论和原因 -->
+                <a-tooltip v-if="!record.running" :title="canControl(record, 'start').reason">
+                  <span>
+                    <a-button
+                      size="small"
+                      type="primary"
+                      :loading="acting[record.dir]"
+                      :disabled="!canControl(record, 'start').ok"
+                      @click="confirmControl(record, 'start')"
+                    >
+                      启动
+                    </a-button>
+                  </span>
+                </a-tooltip>
+                <a-tooltip v-if="record.running" :title="canControl(record, 'stop').reason">
+                  <span>
+                    <a-button
+                      size="small"
+                      danger
+                      :loading="acting[record.dir]"
+                      :disabled="!canControl(record, 'stop').ok"
+                      @click="confirmControl(record, 'stop')"
+                    >
+                      停止
+                    </a-button>
+                  </span>
+                </a-tooltip>
+                <a-tooltip :title="canControl(record, 'restart').reason">
+                  <span>
+                    <a-button
+                      size="small"
+                      :loading="acting[record.dir]"
+                      :disabled="!canControl(record, 'restart').ok"
+                      @click="confirmControl(record, 'restart')"
+                    >
+                      重启
+                    </a-button>
+                  </span>
                 </a-tooltip>
               </a-space>
             </template>
@@ -883,7 +922,11 @@ const goRepo = (slug: string) =>
       @ok="doBatchEnv"
     >
       <a-radio-group v-model:value="envBatchTarget" style="margin-bottom: 12px">
-        <a-radio-button value="override">systemd（override.conf）</a-radio-button>
+        <a-radio-button value="override">
+          {{
+            t("TXT_CODE_RUNNER_ENV_SCOPE_LISTENER")
+          }}
+        </a-radio-button>
         <a-radio-button value="dotenv">运行时 .env</a-radio-button>
       </a-radio-group>
       <a-alert
@@ -892,8 +935,8 @@ const goRepo = (slug: string) =>
         style="margin-bottom: 12px"
         :message="
           envBatchTarget === 'override'
-            ? '合并写入 systemd 单元的 Environment=（进监听进程）：只增改下方变量、删除指定变量名，各 runner 其余变量（如各自的 DEVICE_ID）保持不变。代理这类要让 runner 连上 GitHub 的变量必须写在这里。写入后需重启单元生效。'
-            : '合并写入 runner 目录的 .env（只进 job/step）：只增改下方变量、删除指定变量名，各 runner 其余变量保持不变。设备号、库路径这类放这里。写入后需重启单元生效。'
+            ? '合并写入监听进程的环境：只增改下方变量、删除指定变量名，各 runner 其余变量（如各自的 DEVICE_ID）保持不变。代理这类要让 runner 连上 GitHub 的变量必须写在这里。写入后需重启才生效。'
+            : '合并写入 runner 目录的 .env（只进 job/step）：只增改下方变量、删除指定变量名，各 runner 其余变量保持不变。设备号、库路径这类放这里。写入后需重启才生效。'
         "
       />
       <a-alert
@@ -901,7 +944,7 @@ const goRepo = (slug: string) =>
         type="warning"
         show-icon
         style="margin-bottom: 12px"
-        :message="`选中的 ${selectedRunners.length} 个里有 ${selectedRunners.length - envBatchTargets.length} 个没有 systemd 服务，将被跳过。`"
+        :message="`选中的 ${selectedRunners.length} 个里有 ${selectedRunners.length - envBatchTargets.length} 个的托管方式写不了监听进程环境变量，将被跳过。`"
       />
       <a-typography-text strong>增改变量（upsert）</a-typography-text>
       <div style="margin-top: 8px">
@@ -967,7 +1010,7 @@ const goRepo = (slug: string) =>
         :message="`其中 ${batchBusyCount} 个正在跑 job，删除会当场中断这些 CI 任务！`"
       />
       <p style="margin-bottom: 8px">
-        每个 runner 都会：停卸 systemd 服务 · 从 GitHub 注销 · 删除目录。
+        每个 runner 都会：停止并从托管方收回 · 从 GitHub 注销 · 删除目录。
       </p>
       <a-form layout="vertical">
         <a-form-item label="GitHub 删除 token（可选，整批共用）">

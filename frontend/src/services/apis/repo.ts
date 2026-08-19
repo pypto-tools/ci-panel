@@ -4,27 +4,12 @@
 // runner 目录下的 .runner 决定它属于哪个仓库，.service 决定它由哪个 systemd 单元托管。
 import { useDefineApi } from "@/stores/useDefineApi";
 
-// runner 由谁托管。both 和 none 都是要在 UI 上报警的异常态
-export type RunnerManagedBy = "systemd" | "panel" | "both" | "none";
+// runner 引用的形状来自 common，与 panel 同一份声明（common/src/runner_protocol.ts）。
+// 之前这里手写了一份镜像，而本文件不引 common —— panel 改字段时编译器罩不到它，
+// 孤儿/冲突统计会静默归零、状态文案会哑掉。只用 import type：编译期擦除，不进浏览器 bundle。
+import type { RepoRunnerRef } from "mcsmanager-common";
 
-export interface RepoRunner {
-  daemonId: string;
-  nodeName: string;
-  dir: string;
-  dirName: string;
-  agentName: string; // runner 在 GitHub 上的名字，未必等于目录名
-  managedBy: RunnerManagedBy;
-  service: string; // systemd 单元名，空 = 没装服务
-  instanceUuid: string;
-  running: boolean;
-  busy: boolean; // 正在跑 job——停它会中断 CI 任务
-  statusText: string;
-  since: string;
-  source: "provision" | "import" | ""; // .cipanel 里的纳管来源
-  group: string; // .cipanel 里的所属组
-  markerId: string; // .cipanel 里的管理标识
-  broken?: string;
-}
+export type RepoRunner = RepoRunnerRef;
 
 export interface RepoSummary {
   slug: string;

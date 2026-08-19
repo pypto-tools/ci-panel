@@ -11,6 +11,7 @@ import { WarningOutlined, FolderOpenOutlined } from "@ant-design/icons-vue";
 import { openNodeSelectDialog } from "@/components/fc/index";
 import { scanRunners, registerRunners, type ScannedRunner } from "@/services/apis/runner";
 import { t } from "@/lang/i18n";
+import { ownershipHint, ownershipTag } from "@/tools/supervisor";
 import SelectDirDialog from "./SelectDirDialog.vue";
 
 const emit = defineEmits<{ (e: "imported"): void }>();
@@ -117,7 +118,9 @@ async function submit() {
     const repos = state.value?.registeredRepos || [];
     if (ok) emit("imported");
     if (fail.length) {
-      message.warning(`纳管 ${ok} 个，失败 ${fail.length} 个：${fail.map((f) => f.error).join("；")}`);
+      message.warning(
+        `纳管 ${ok} 个，失败 ${fail.length} 个：${fail.map((f) => f.error).join("；")}`
+      );
     } else {
       message.success(
         repos.length
@@ -157,7 +160,9 @@ defineExpose({ openDialog });
         @press-enter="doScan"
       />
       <a-button style="width: 80px" @click="openDirPicker"><FolderOpenOutlined /> 浏览</a-button>
-      <a-button type="primary" style="width: 80px" :loading="scanning" @click="doScan">扫描</a-button>
+      <a-button type="primary" style="width: 80px" :loading="scanning" @click="doScan">
+        扫描
+      </a-button>
     </a-input-group>
 
     <a-alert
@@ -198,12 +203,11 @@ defineExpose({ openDialog });
         </template>
       </a-table-column>
 
-      <a-table-column key="managedBy" title="托管方式" :width="110">
+      <a-table-column key="ownership" :title="t('TXT_CODE_RUNNER_COL_OWNERSHIP')" :width="110">
         <template #default="{ record }">
-          <a-tag v-if="record.managedBy === 'systemd'" color="blue">systemd</a-tag>
-          <a-tag v-else-if="record.managedBy === 'panel'" color="purple">面板实例</a-tag>
-          <a-tag v-else-if="record.managedBy === 'both'" color="error">冲突</a-tag>
-          <a-tag v-else color="warning">无人托管</a-tag>
+          <a-tooltip :title="ownershipHint(record)">
+            <a-tag :color="ownershipTag(record).color">{{ ownershipTag(record).label }}</a-tag>
+          </a-tooltip>
         </template>
       </a-table-column>
 

@@ -25,6 +25,17 @@ export interface ListenerProc {
 // 一次全开又会同时占几千个 fd。沿用 runner_scan.busyRunnerDirs 原有的做法。
 const CHUNK = 256;
 
+// 从 cmdline 认出 runner 进程，并捕获它的 runner 目录。
+//
+// **`bin` 后面那段版本号不是可选的装饰，是常态。** runner 自更新时把新包铺到 `bin.<版本>` 与
+// `externals.<版本>`，而且新的 Worker **立刻**从那里起；listener 自己要等单元重启才切回 `bin`。
+// 于是"已自更新、还没重启"的 runner 在机器上就是 listener 在 `bin/`、Worker 在 `bin.2.336.0/`
+// 这种混合形态 —— 只认 `/bin/` 的话，Worker 一个都匹配不上，busy 恒为 false，面板上「正在跑
+// job」永远是 0（listener 照旧认得出，所以「运行中」是对的，这个组合正是它难被发现的原因）。
+// 重启之后 listener 也会跑在 `bin.<版本>` 里，那时若认不出，整个目录会退化成 ownership:idle
+// —— 而 idle 是唯一放行 start 的取值，代价从少报一个数字变成双托管。
+const RUNNER_BIN_RE = /^(\S+)\/bin(?:\.[\d.]+)?\/Runner\.(Listener|Worker)\b/;
+
 /**
  * 扫出本机所有 runner 监听进程。procRoot 可注入，否则这段逻辑没法测。
  *
@@ -61,7 +72,7 @@ export async function scanListenerProcs(procRoot = "/proc"): Promise<ListenerPro
           const cmdline = (
             await fs.promises.readFile(`${procRoot}/${pid}/cmdline`, "utf8")
           ).replace(/\0/g, " ");
-          const m = cmdline.match(/^(\S+)\/bin\/Runner\.(Listener|Worker)\b/);
+          const m = cmdline.match(RUNNER_BIN_RE);
           if (!m) return;
 
           if (m[2] === "Worker") {

@@ -117,6 +117,69 @@ describe("scanListenerProcs", () => {
     fs.removeSync(path.join(procRoot, "5002"));
   });
 
+  // A self-updated runner is the common case, not an exotic one: the runner stages the new release
+  // in bin.<version>/externals.<version> and spawns the new Worker from there immediately, while
+  // its own listener keeps running out of bin/ until the unit restarts. Production hosts therefore
+  // show `<dir>/bin/Runner.Listener` next to `<dir>/bin.2.336.0/Runner.Worker`.
+  describe("a runner that has self-updated", () => {
+    const dirC = path.join(SCAN_ROOT, "org-repo", "runner-3");
+
+    beforeAll(() => {
+      fs.mkdirsSync(dirC);
+      writeProc(6001, {
+        comm: "Runner.Listener",
+        cmdline: `${dirC}/bin/Runner.Listener run --startuptype service`,
+        pgid: 6001
+      });
+      writeProc(6002, {
+        comm: "Runner.Worker",
+        cmdline: `${dirC}/bin.2.336.0/Runner.Worker spawnclient 195 199`,
+        ppid: 6001,
+        pgid: 6001
+      });
+    });
+
+    afterAll(() => {
+      fs.removeSync(path.join(procRoot, "6001"));
+      fs.removeSync(path.join(procRoot, "6002"));
+    });
+
+    it("still sees the job through a Worker living in bin.<version>", async () => {
+      // The regression this pins: a /bin/-only pattern matched every listener and no worker, so
+      // "running" stayed correct while every busy count silently read 0.
+      const procs = await scanListenerProcs(procRoot);
+      expect(procs.find((p) => p.pid === 6001)?.busy).toBe(true);
+      expect(procs.map((p) => p.pid)).not.toContain(6002);
+    });
+
+    it("recognises a listener running out of bin.<version> too, with its directory intact", async () => {
+      // After the restart the listener itself moves into the versioned directory. Failing to match
+      // it there costs more than a wrong number: zero instances reads as ownership idle, the one
+      // value that lets a start through, so a second listener could be launched over a live one.
+      writeProc(6003, {
+        comm: "Runner.Listener",
+        cmdline: `${dirC}/bin.2.336.0/Runner.Listener run --startuptype service`,
+        pgid: 6003
+      });
+      const procs = await scanListenerProcs(procRoot);
+      expect(procs.find((p) => p.pid === 6003)).toMatchObject({ dir: dirC, busy: false });
+      fs.removeSync(path.join(procRoot, "6003"));
+    });
+
+    it("does not treat a sibling directory as a runner bin", async () => {
+      // Only a version suffix is accepted. `binaries/` or `bin-old/` are not the runner layout, and
+      // matching them would invent instances for directories nothing is supervising.
+      writeProc(6004, {
+        comm: "Runner.Listener",
+        cmdline: `${dirC}/binaries/Runner.Listener run`,
+        pgid: 6004
+      });
+      const procs = await scanListenerProcs(procRoot);
+      expect(procs.map((p) => p.pid)).not.toContain(6004);
+      fs.removeSync(path.join(procRoot, "6004"));
+    });
+  });
+
   it("survives a missing cgroup file", async () => {
     // Kernel configuration differs; the systemd backend degrades to a MainPID check rather than
     // losing the process entirely.

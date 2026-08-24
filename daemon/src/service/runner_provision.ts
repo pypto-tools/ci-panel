@@ -30,6 +30,7 @@ import { dirKey, withRunnerLock } from "./runner_lock";
 import {
   formatEnvLines,
   MAX_VALUE_LEN,
+  runAsRootEnv,
   sanitizeEnvVars,
   writeDotEnvFile,
   type RunnerEnvVar
@@ -55,8 +56,8 @@ function resolveProxy(proxy?: string): string {
   return (proxy || "").trim() || (process.env.CIP_RUNNER_PROXY || "").trim();
 }
 
-// 代理在 <dir>/.env 里的那几条。作为默认值写在用户填的初始变量之前（同名以用户的为准）。
-function proxyDotEnvVars(proxy: string): RunnerEnvVar[] {
+// 代理的那几条。作为默认值写在用户填的初始变量之前（同名以用户的为准）。
+function proxyEnvVars(proxy: string): RunnerEnvVar[] {
   if (!proxy) return [];
   return [
     { key: "HTTP_PROXY", value: proxy },
@@ -64,6 +65,21 @@ function proxyDotEnvVars(proxy: string): RunnerEnvVar[] {
     { key: "ALL_PROXY", value: proxy },
     { key: "NO_PROXY", value: "localhost,127.0.0.1,::1" }
   ];
+}
+
+/**
+ * 把代理作为默认值并进某一组初始变量，再走统一校验。
+ *
+ * **两个作用域都要用它。** 代理要到的地方有两处，而以前只写了一处：`<dir>/.env` 只组装
+ * job/step 的环境，Runner.Listener 从不读它 —— 于是靠 daemon 的 `CIP_RUNNER_PROXY` 兜底的节点
+ * 拿到的是一个没有代理的 listener，面板上表现为「装好就起不来」。面板那个「把代理填进监听
+ * 进程变量」的按钮，做的正是这里本该自动做的事。
+ *
+ * 收成一个函数而不是两边各写一遍：两份迟早会走岔，而走岔的那份会是 listener 那份 —— 从面板上
+ * 它恰恰是更难看出来的那一个。
+ */
+export function withProxyDefaults(proxy: string, vars?: RunnerEnvVar[]): RunnerEnvVar[] {
+  return sanitizeEnvVars([...proxyEnvVars(proxy), ...(vars || [])]);
 }
 
 // actions-runner 自己会往 .env 里塞东西：config.sh 末尾 `source ./env.sh`，而 env.sh 把下面这份
@@ -87,8 +103,8 @@ export const RUNNER_ENV_SH_KEYS = [
   "PERL5LIB"
 ];
 
-// 「不填也会进 .env 的东西」，供面板在创建前如实展示。两个来源分开报，因为它们的覆盖规则不同：
-//   panel  —— 面板按代理字段写的，用户在表单里填同名变量即可覆盖
+// 「不填也会被写下去的东西」，供面板在创建前如实展示。两个来源分开报，因为它们的覆盖规则不同：
+//   panel  —— 面板按代理字段写的，同时进 .env 与监听进程；用户在表单里填同名变量即可覆盖
 //   runner —— runner 注册时从 daemon 进程环境快照的，用户填了同名变量它就不会再写
 export interface DefaultDotEnvPreview {
   proxy: string; // 实际生效的代理（前端没填时是 daemon 的 CIP_RUNNER_PROXY 兜底）
@@ -107,7 +123,7 @@ export function previewDefaultDotEnv(proxy?: string): DefaultDotEnvPreview {
   if (raw.length > MAX_PROXY_ARG_LEN) throw new Error(`代理地址过长(上限 ${MAX_PROXY_ARG_LEN})`);
   if (/\s/.test(raw)) throw new Error("代理地址不能包含空白字符");
   const resolved = resolveProxy(raw);
-  const panel = proxyDotEnvVars(resolved);
+  const panel = proxyEnvVars(resolved);
   const taken = new Set(panel.map((v) => v.key));
   const runner = RUNNER_ENV_SH_KEYS.filter((key) => !taken.has(key))
     .map((key) => ({ key, value: String(process.env[key] ?? "") }))
@@ -349,19 +365,22 @@ async function runProvision(params: Omit<ProvisionRunnerParams, "targetDir">, ta
   // ---- 2) 代理 + 用户填的初始变量写入 <dir>/.env（actions-runner 运行时读取；供 run.sh 上线用）----
   // 在 config.sh 之前写完，所以第一个 job 就带着这些变量跑，不需要先建好再改一遍。
   // 同名以用户填的为准（sanitizeEnvVars 里后者覆盖前者）：代理那四条只是默认值。
-  const childEnv: NodeJS.ProcessEnv = { ...process.env };
-  const dotenvVars = sanitizeEnvVars([...proxyDotEnvVars(proxy), ...(params.envDotenv || [])]);
+  // runAsRootEnv 在前、process.env 在后：补的是一个默认值，daemon 自己环境里显式设过的赢。
+  const childEnv: NodeJS.ProcessEnv = { ...runAsRootEnv(), ...process.env };
+  const dotenvVars = withProxyDefaults(proxy, params.envDotenv);
   // listener 那一份也在这里就校验掉。它真正被写下去要等第 4.5 步，但 sanitizeEnvVars 会对非法
   // 变量名/带换行的值/超长值抛错——留到那时才抛，runner 已经注册进 GitHub、listener 也已经拉
   // 起来了，一个手滑的变量名换来的是「置备失败但东西全在」这种最难收拾的半成品。
-  const listenerVars = sanitizeEnvVars(params.envOverride || []);
+  const listenerVars = withProxyDefaults(proxy, params.envOverride);
   if (dotenvVars.length) writeDotEnvFile(targetDir, dotenvVars);
   if (proxy) {
     childEnv.HTTP_PROXY = childEnv.HTTPS_PROXY = childEnv.ALL_PROXY = proxy;
     childEnv.NO_PROXY = "localhost,127.0.0.1,::1";
   }
 
-  // ---- 3) config.sh 注册（已注册则跳过；必须以非 root 运行，daemon 本身即 ci-runner）----
+  // ---- 3) config.sh 注册（已注册则跳过）----
+  // 以 daemon 自己的身份跑。systemd 节点上那是 ci-runner；容器节点上常常就是 root，而 runner
+  // 以 root 跑要求 RUNNER_ALLOW_RUNASROOT（上面的 childEnv 已经补好）。
   const alreadyConfigured = fs.existsSync(path.join(targetDir, ".runner"));
   if (!alreadyConfigured) {
     step("注册到 GitHub");
@@ -613,7 +632,7 @@ export async function uninstallSystemdService(
   }
 }
 
-// 从 GitHub 注销 runner：config.sh remove --token <删除token>。以 ci-runner 身份跑，走代理。
+// 从 GitHub 注销 runner：config.sh remove --token <删除token>。以 daemon 自己的身份跑，走代理。
 // 需要先停掉 runner（否则 GitHub 会拒绝移除在线 runner）——由调用方保证卸载 systemd 在前。
 export async function removeGithubRegistration(
   dir: string,
@@ -623,7 +642,9 @@ export async function removeGithubRegistration(
   const configSh = path.join(dir, "config.sh");
   if (!fs.existsSync(configSh)) return { ok: false, error: "config.sh 不存在，无法注销" };
   const pxy = resolveProxy(proxy);
-  const childEnv: NodeJS.ProcessEnv = { ...process.env };
+  // 注册那一侧同样补这个默认值。少了它，root 容器上删除会卡在注销这一步，而 GitHub 侧会留下
+  // 一个再也没人对应的幽灵身份。
+  const childEnv: NodeJS.ProcessEnv = { ...runAsRootEnv(), ...process.env };
   if (pxy) {
     childEnv.HTTP_PROXY = childEnv.HTTPS_PROXY = childEnv.ALL_PROXY = pxy;
     childEnv.NO_PROXY = "localhost,127.0.0.1,::1";

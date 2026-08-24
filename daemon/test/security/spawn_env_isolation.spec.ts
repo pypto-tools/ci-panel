@@ -19,8 +19,19 @@ const fixture = makeRunner("env-isolation");
 const INJECTED = ["CIP_GITHUB_TOKEN", "CIP_RUNNER_PROXY", "CIP_SOMETHING_NEW"] as const;
 const saved = new Map<string, string | undefined>();
 
+// The daemon adds RUNNER_ALLOW_RUNASROOT when it is root, so what belongs in the listener's
+// environment depends on the uid. Pinned to a non-root value rather than read from the machine:
+// otherwise these assertions say something different on a root container than on a developer's
+// box, and the exact-membership check below — the one that catches a variable nobody anticipated
+// — would have to be loosened to a subset check to survive both.
+const realGetuid = process.getuid;
+const asUid = (uid: number) => {
+  process.getuid = () => uid;
+};
+
 beforeEach(async () => {
   await removeRuntime(fixture.markerId);
+  asUid(1000);
   for (const k of INJECTED) saved.set(k, process.env[k]);
   process.env.CIP_GITHUB_TOKEN = "ghp_this_must_not_leak";
   process.env.CIP_RUNNER_PROXY = "http://user:secret@127.0.0.1:7890";
@@ -28,6 +39,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  process.getuid = realGetuid;
   for (const k of INJECTED) {
     const prev = saved.get(k);
     if (prev === undefined) delete process.env[k];
@@ -59,6 +71,20 @@ describe("the listener's environment", () => {
     const allowed = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TZ"];
     expect(Object.keys(env).every((k) => allowed.includes(k))).toBe(true);
     expect(env.PATH).toBe(process.env.PATH);
+  });
+
+  it("adds exactly one variable when the daemon is root, and no more", async () => {
+    // The root-container path needs RUNNER_ALLOW_RUNASROOT or the listener exits 0 on startup.
+    // Supplying it must stay a single named addition: reaching for process.env to solve that
+    // problem is what this whole file exists to prevent, and a root daemon is the case where the
+    // daemon's own environment is most likely to hold the deploy .env's CIP_GITHUB_TOKEN.
+    asUid(0);
+    const allowed = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TZ"];
+    const env = await spawnEnv();
+    expect(env.RUNNER_ALLOW_RUNASROOT).toBe("1");
+    expect(Object.keys(env).filter((k) => !allowed.includes(k))).toEqual([
+      "RUNNER_ALLOW_RUNASROOT"
+    ]);
   });
 
   it("carries what was configured for the listener scope", async () => {

@@ -15,6 +15,7 @@ import fs from "fs-extra";
 import { $t } from "../../../i18n";
 import { canonicalPath } from "../../../tools/path_link_check";
 import logger from "../../log";
+import { runAsRootEnv } from "../../runner_env_vars";
 import { errText } from "../../runner_provision";
 import { detachHint } from "../hints";
 import { scanListenerProcs, type ListenerProc } from "../local_procs";
@@ -31,6 +32,7 @@ import {
   markerIdOf,
   mutateRuntime,
   readListenerEnvFile,
+  readRunLogTail,
   readRuntime,
   removeRuntime,
   rotateAndOpenRunLog,
@@ -126,7 +128,11 @@ const LISTENER_ENV_BASE = [
 export function listenerBaseEnv(): Record<string, string> {
   const base: Record<string, string> = {};
   for (const k of LISTENER_ENV_BASE) if (process.env[k]) base[k] = process.env[k]!;
-  return base;
+  // 白名单挡掉 daemon 环境里的 CIP_* 时，也顺带挡掉了 RUNNER_ALLOW_RUNASROOT —— 而 root 容器上
+  // 少了它，run.sh 一起来就 exit 0（见 runAsRootEnv）。这里是「按名字补一个 runner 要求的变量」，
+  // 与「整份继承 process.env」是两件事。用户在 listener 作用域显式填的仍然覆盖它：spawn 时这份
+  // 基础环境排在 listenerEnvFor 之前。
+  return { ...base, ...runAsRootEnv() };
 }
 
 // 指数退避：failures=0 回 0（第一次尝试不等）
@@ -342,7 +348,13 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
           // 的话这些情形下 failures 恒 0、退避形同虚设，reconcile 每拍重 spawn 一次，
           // 而 detail 一片空白，用户看不出它为什么一直在重启。
           if (rt?.startedAt && deps.now() - rt.startedAt >= HEALTHY_MS) return;
-          fail(new Error(`run.sh 过早退出 code=${code} sig=${sig}`), false);
+          // 退出码说不出病因：官方那几条正常退出 0 的路径给出的是同一句话。真正的原因在 run.sh
+          // 自己的输出里，而 lastError 是面板上唯一看得到的那一行，所以尾巴要跟着一起记。
+          const tail = await readRunLogTail(markerId);
+          fail(
+            new Error(`run.sh 过早退出 code=${code} sig=${sig}${tail ? `: ${tail}` : ""}`),
+            false
+          );
         })();
       });
       child.unref(); // 不让这个 ChildProcess 一直吊着事件循环

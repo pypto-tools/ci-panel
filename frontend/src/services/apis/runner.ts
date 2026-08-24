@@ -149,8 +149,8 @@ export const checkRunnerProxy = useDefineApi<
   method: "POST"
 });
 
-// 创建时「不填也会进 .env」的两批变量，分开报是因为覆盖规则不同：
-//   panel  —— 面板按代理字段写的，表单里填同名变量即可覆盖
+// 创建时「不填也会被写下去」的两批变量，分开报是因为覆盖规则不同：
+//   panel  —— 面板按代理字段写的，同时进 .env 与监听进程；表单里填同名变量即可覆盖
 //   runner —— runner 注册末尾（config.sh → env.sh）从 daemon 进程环境快照的；
 //             表单里填了同名变量它就不会再写（env.sh 只补 .env 里还没有的键）
 export interface DefaultDotEnvPreview {

@@ -19,6 +19,24 @@ export const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 export const MAX_VARS = 100;
 export const MAX_VALUE_LEN = 4096;
 
+/**
+ * 以 root 跑时 GitHub runner 自己要求的那一个变量。
+ *
+ * uid=0 且没有它时，`config.sh` 与 `run.sh` 都会打印 `Must not run interactively with sudo`
+ * 然后 **exit 0** —— 一次「官方认为正常」的退出。监督只看得到「没活过 HEALTHY_MS」，于是把
+ * 真正的原因报成 `code=0 sig=null`。
+ *
+ * root 容器不是意外：process 后端存在的理由就是「节点没有 systemd」，而那在实践中就是容器，
+ * K8s / task pod 默认 uid=0。所以这个变量由 daemon 自己补上，不劳用户逐个 runner 去填。
+ *
+ * 补的是「runner 的硬性要求」，不是把 daemon 的环境放进来 —— 监听进程的环境仍然是白名单
+ * （见 supervisor/process 的 listenerBaseEnv）。uid 可传入，纯粹为了两条分支都能被用例钉住：
+ * 跑测试的机器是不是 root 是那台机器的属性，不该决定断言的内容。
+ */
+export function runAsRootEnv(uid = process.getuid?.()): Record<string, string> {
+  return uid === 0 ? { RUNNER_ALLOW_RUNASROOT: "1" } : {};
+}
+
 // 校验并去重环境变量清单（同名后者覆盖前者），返回规范化后的数组
 export function sanitizeEnvVars(vars: RunnerEnvVar[]): RunnerEnvVar[] {
   const map = new Map<string, string>();

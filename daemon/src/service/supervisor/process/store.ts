@@ -167,6 +167,50 @@ export async function rotateAndOpenRunLog(markerId: string): Promise<number> {
   return fs.open(file, "a");
 }
 
+// 从末尾读多少字节、留最后几行、整段最长多少。三个上限都是给 lastError 用的：
+// 那个字段最终显示在面板的一行里，而 run.sh 的输出是持续的、没有天然上限。
+const TAIL_READ_BYTES = 4096;
+const TAIL_LINES = 3;
+const TAIL_MAX_LEN = 300;
+
+/**
+ * run.sh 日志的末尾几行，给 lastError 用。
+ *
+ * 只有 `code=0 sig=null` 的话，官方 run.sh 那几条正常退出 0 的路径长得一模一样，用户看不出
+ * 病因；而真正的那句话就在它自己的输出里（root 容器上是 `Must not run interactively with sudo`）。
+ *
+ * 只读末尾一小段而不是整份：这个文件在节点本地盘上、由子进程持续追加。取「最后几行非空行」
+ * 而不是原样一段尾巴：退出前常有一串空行/进度输出，把它们留着就会把唯一有用的那句挤出
+ * lastError 的长度上限。
+ */
+export async function readRunLogTail(markerId: string): Promise<string> {
+  try {
+    const file = runLogPath(markerId);
+    const { size } = await fs.stat(file);
+    const length = Math.min(size, TAIL_READ_BYTES);
+    if (length <= 0) return "";
+    const buf = Buffer.alloc(length);
+    const fd = await fs.open(file, "r");
+    try {
+      const { bytesRead } = await fs.read(fd, buf, 0, length, size - length);
+      return buf
+        .subarray(0, bytesRead)
+        .toString("utf8")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .slice(-TAIL_LINES)
+        .join(" | ")
+        .slice(-TAIL_MAX_LEN);
+    } finally {
+      await fs.close(fd);
+    }
+  } catch {
+    // 读不到日志不该盖掉「进程退出了」这件事本身：调用方拿到空串，照样会记下退出码。
+    return "";
+  }
+}
+
 // ---- 监听进程作用域的环境变量 ----
 //
 // 与 runner 目录的 .env（只进 job/step）是两个作用域：这一份进 Runner.Listener 自己的环境，

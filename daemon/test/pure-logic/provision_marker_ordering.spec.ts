@@ -74,4 +74,13 @@ describe("hosting goes through the backend", () => {
     // already up by the time these land, so it needs a restart to pick them up.
     expect(at("writeListenerEnv(")).toBeLessThan(at("backend.restart("));
   });
+
+  it("puts the proxy in both scopes, not only in .env", () => {
+    // Which scopes a variable reaches is not something a signature can hold: both compositions
+    // type-check with or without the proxy block, and the consequence of dropping it from the
+    // listener side only shows up on a node that actually needs a proxy to reach GitHub. Pinned
+    // textually for the same reason the ordering above is.
+    expect(body).toContain("withProxyDefaults(proxy, params.envDotenv)");
+    expect(body).toContain("withProxyDefaults(proxy, params.envOverride)");
+  });
 });

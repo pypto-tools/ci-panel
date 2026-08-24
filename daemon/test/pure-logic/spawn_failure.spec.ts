@@ -1,8 +1,10 @@
+import fs from "fs-extra";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createProcessSupervisor } from "../../src/service/supervisor/process";
 import {
   readRuntime,
   removeRuntime,
+  runLogPath,
   writeRuntime
 } from "../../src/service/supervisor/process/store";
 import { fakeChild, fakeDeps, listenerProc, makeRunner } from "../helpers/process_fixture";
@@ -68,6 +70,27 @@ describe("a run.sh that exits on its own", () => {
     const rt = await readRuntime(fixture.markerId);
     expect(rt?.failures).toBe(1);
     expect(rt?.lastError).toContain("过早退出");
+  });
+
+  it("says what run.sh printed on its way out", async () => {
+    // `code=0 sig=null` is the same sentence for every one of those exit paths, so on its own it
+    // tells a user nothing. The reason is in the runner's own output — on a root container it is
+    // literally "Must not run interactively with sudo" — and the detail shown in the panel comes
+    // from lastError, so that is where the tail has to land.
+    const child = fakeChild(4242);
+    const deps = fakeDeps({ spawn: () => child });
+    await createProcessSupervisor(deps).spawnOnce(fixture.dir);
+    fs.appendFileSync(
+      runLogPath(fixture.markerId),
+      "√ Connected to GitHub\n\nMust not run interactively with sudo\nExiting runner...\n\n"
+    );
+    child.emit("exit", 0, null);
+    await flush();
+    const rt = await readRuntime(fixture.markerId);
+    expect(rt?.lastError).toContain("Must not run interactively with sudo");
+    // Blank trailing lines are what a real exit leaves behind; keeping them would push the one
+    // sentence that matters out of a length-capped field.
+    expect(rt?.lastError).toContain("Exiting runner...");
   });
 
   it("does not count an exit after a long healthy run", async () => {

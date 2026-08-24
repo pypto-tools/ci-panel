@@ -292,13 +292,19 @@ const defaultEnvRows = computed<DefaultEnvRow[]>(() => {
   // 任一组填了同名变量就算被覆盖：这里只是提示，宁可说得保守些
   const filled = new Set(envStates.value.flatMap((s) => s.dotenv.map((v) => v.key)));
   return [
-    ...d.panel.map((v) => ({ ...v, from: "面板（代理）", overridden: filled.has(v.key) })),
+    // 代理进两个作用域：.env（job/step）与监听进程。只说 .env 会让人以为 listener 没有代理，
+    // 而那恰好是这批变量最要紧的去处 —— 少了它 runner 连不上 GitHub。
+    ...d.panel.map((v) => ({
+      ...v,
+      from: "面板（代理，.env 与监听进程各一份）",
+      overridden: filled.has(v.key)
+    })),
     ...d.runner.map((v) => ({ ...v, from: "runner 注册时快照", overridden: filled.has(v.key) }))
   ];
 });
 
-// 把当前填的代理补进某组的 systemd 变量框：这是这个框最常见的用途（监听进程不读 .env，
-// 代理不写进 drop-in，runner 装完就连不上 GitHub）。已有同名行则不重复追加。
+// 把当前填的代理补进某组的监听进程变量框。daemon 置备时已经会自动写这几条，所以这个按钮
+// 剩下的用途是「让它显式可见」与「改成另一个地址」——填进来的同名变量赢。已有同名行不重复追加。
 function fillProxyEnv(g: Group) {
   const proxy = shared.proxy.trim();
   if (!proxy) return message.error("请先在上面填写代理地址");
@@ -1188,7 +1194,8 @@ const statusColor = (s: string) =>
             </div>
             <div class="env-tip">
               写入 systemd 单元的 Environment=，进「监听进程」。代理这类要让 runner 连上 GitHub
-              的变量必须放这里。创建时写入，并重启单元使其生效。
+              的变量必须放这里——上面填的代理创建时会自动写入，这里只在要覆盖它时填。创建时写入，
+              并重启单元使其生效。
             </div>
             <a-textarea
               v-model:value="g.envOverride"

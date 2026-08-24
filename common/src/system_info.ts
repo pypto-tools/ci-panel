@@ -15,6 +15,9 @@ interface ISystemInfo {
   type: string;
   hostname: string;
   platform: string;
+  // os.arch() of the reporting process: x64 / arm64 / ... The panel needs it to prefill
+  // architecture-dependent values for a node, e.g. the default runner labels.
+  arch: string;
   release: string;
   distro: string;
   uptime: number;
@@ -42,6 +45,7 @@ const info: ISystemInfo = {
   type: os.type(),
   hostname: os.hostname(),
   platform: os.platform(),
+  arch: os.arch(),
   release: os.release(),
   distro: readDistro(),
   uptime: os.uptime(),

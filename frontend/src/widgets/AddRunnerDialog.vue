@@ -13,6 +13,7 @@ import {
 import { onUnmounted } from "vue";
 import { t } from "@/lang/i18n";
 import { labelKey, previewGroupNames } from "@/tools/runnerNaming";
+import { defaultRunnerLabels } from "@/tools/runnerLabels";
 import { expandEnvVars, formatEnvPreview, parseEnvText, type EnvVar } from "@/tools/envText";
 import { envTemplateIndexOf, hasEnvTemplate } from "@/tools/envTemplate";
 import { openNodeSelectDialog } from "@/components/fc/index";
@@ -83,6 +84,10 @@ function openDirPicker() {
 interface Group {
   baseName: string;
   labels: string;
+  // 标签是否仍是我们按节点架构预填的。换节点时只重填这些组——用户手打的、或点已有标签组
+  // 复用来的，都是他自己的选择，改掉就是背着他换 job 的落点。
+  // 靠字符串形状反推做不到这件事：`linux,npu` 和 `linux,ppc64` 长得一模一样。
+  labelsAuto: boolean;
   count: string; // 绑 a-input（同款控件保证高度一致）；用到时 Number(g.count)
   // 该组每个 runner 的初始环境变量，两个目标各一个文本框（每行 KEY=VALUE）。
   // 提交时解析成 {key,value}[]；值里的 {{index}} 这类占位符由 daemon 按每个 runner 展开。
@@ -90,9 +95,15 @@ interface Group {
   envDotenv: string;
   envOpen: boolean; // 折叠面板是否展开，纯界面态、不提交
 }
-const newGroup = (baseName = "", labels = "linux,arm64"): Group => ({
+// 所选节点自报的架构（daemon 的 os.arch()），空表示还没选节点或节点没报。
+const nodeArch = ref("");
+const defaultLabels = computed(() => defaultRunnerLabels(nodeArch.value));
+
+// 不给 labels 就按所选节点的架构预填（记为自动值，换节点时可重填）；给了就是用户的选择。
+const newGroup = (baseName = "", labels?: string): Group => ({
   baseName,
-  labels,
+  labels: labels ?? defaultLabels.value,
+  labelsAuto: labels === undefined,
   count: "1",
   envOverride: "",
   envDotenv: "",
@@ -560,6 +571,12 @@ const openDialog = async (m: "direct" | "import" = "direct") => {
     const node = await openNodeSelectDialog();
     if (!node) return;
     daemonId.value = node.uuid;
+    // 默认标签跟着节点的架构走。表单在关窗后是留着的，所以这里要把还是自动值的组重填一遍——
+    // 上一个节点是 arm64、这次选了 x86 服务器，留下来的 linux,arm64 就是错的。
+    nodeArch.value = node.system?.arch || "";
+    for (const g of groups.value) {
+      if (g.labelsAuto) g.labels = defaultLabels.value;
+    }
     mode.value = m;
     checkText.value = "";
     checkOk.value = null;
@@ -1135,7 +1152,12 @@ const statusColor = (s: string) =>
             />
           </a-form-item>
           <a-form-item label="标签（逗号分隔）" style="flex: 2; margin: 0">
-            <a-input v-model:value="g.labels" placeholder="linux,arm64,npu" />
+            <!-- update:value 只在用户改动时由输入框发出，程序赋值不会触发它 -->
+            <a-input
+              v-model:value="g.labels"
+              :placeholder="`${defaultLabels},npu`"
+              @update:value="g.labelsAuto = false"
+            />
           </a-form-item>
           <a-form-item label="数量" style="width: 90px; margin: 0">
             <a-input

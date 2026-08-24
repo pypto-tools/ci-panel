@@ -115,6 +115,8 @@ declare global {
       type: string;
       hostname: string;
       platform: string;
+      // Optional: a daemon older than the panel does not report it yet.
+      arch?: string;
       release: string;
       uptime: number;
       cwd: string;

@@ -1404,5 +1404,14 @@
   "TXT_CODE_RUNNER_BATCH_NONE_CONTROLLABLE": "None of the selected runners can be controlled from the panel.",
   "TXT_CODE_RUNNER_BATCH_SKIPPED": "{count} more cannot be controlled from the panel and will be skipped.",
   "TXT_CODE_RUNNER_ENV_SCOPE_LISTENER": "Listener environment",
-  "TXT_CODE_RUNNER_BUSY": "Running a job"
+  "TXT_CODE_RUNNER_BUSY": "Running a job",
+  "TXT_CODE_RUNNER_EXITED_EARLY": "run.sh exited early, code={{code}} sig={{sig}}",
+  "TXT_CODE_RUNNER_SPAWN_NO_PID": "spawn returned no pid",
+  "TXT_CODE_RUNNER_ENV_FROM_PANEL": "Panel (proxy; one copy in .env, one in the listener process)",
+  "TXT_CODE_RUNNER_ENV_FROM_RUNNER": "Snapshot taken when the runner registered",
+  "TXT_CODE_RUNNER_ENV_OVERRIDDEN": "{from}, overridden by the variable of the same name you entered",
+  "TXT_CODE_RUNNER_ENV_TIP_LISTENER": "Written to the systemd unit's Environment=, so it reaches the listener process. Variables the runner needs in order to reach GitHub, a proxy above all, must go here — the proxy entered above is written automatically on create, so fill this in only to override it. Written on create, and the unit is restarted to apply it.",
+  "TXT_CODE_RUNNER_ENV_TIP_DOTENV": "Written to .env in the runner directory and injected into the job/step environment only, never the listener process. Device numbers, library paths and the like go here. Written on create along with the registration, and effective from the first job.",
+  "TXT_CODE_RUNNER_ENV_TIP_DEFAULT_LOADING": "Reading the variables that will be written automatically…",
+  "TXT_CODE_RUNNER_ENV_TIP_PLACEHOLDERS": "Placeholders in a value expand per runner: <code>{name}</code> the full name, <code>{index}</code> the number in the name, <code>{seq}</code> its position in this batch (from 1); <code>+ - * / %</code> and parentheses are supported."
 }

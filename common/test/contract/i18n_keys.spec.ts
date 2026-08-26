@@ -169,6 +169,18 @@ describe("completeness", () => {
       "TXT_CODE_RUNNER_DELETE_SKIPPED_NOT_STOPPED",
       "TXT_CODE_RUNNER_PROVISION_STEP_ENV_WRITE",
       "TXT_CODE_RUNNER_PROVISION_STEP_ENV_RESTART",
+      // The runner-supervision text that predated the i18n rule: the daemon built `lastError`
+      // (which the panel shows as the runner's detail) from Chinese literals, and the add-runner
+      // dialog's environment panel was Chinese prose next to already-localised siblings.
+      "TXT_CODE_RUNNER_EXITED_EARLY",
+      "TXT_CODE_RUNNER_SPAWN_NO_PID",
+      "TXT_CODE_RUNNER_ENV_FROM_PANEL",
+      "TXT_CODE_RUNNER_ENV_FROM_RUNNER",
+      "TXT_CODE_RUNNER_ENV_OVERRIDDEN",
+      "TXT_CODE_RUNNER_ENV_TIP_LISTENER",
+      "TXT_CODE_RUNNER_ENV_TIP_DOTENV",
+      "TXT_CODE_RUNNER_ENV_TIP_DEFAULT_LOADING",
+      "TXT_CODE_RUNNER_ENV_TIP_PLACEHOLDERS",
       // Inherited from upstream MCSManager: the daemon has always called $t() for this on the
       // forced-shutdown path, but no catalogue ever defined it, so it reached the log as the
       // literal key. Defined in en_US/zh_CN now; the ten translations start from here.

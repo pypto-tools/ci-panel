@@ -351,10 +351,14 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
           // 退出码说不出病因：官方那几条正常退出 0 的路径给出的是同一句话。真正的原因在 run.sh
           // 自己的输出里，而 lastError 是面板上唯一看得到的那一行，所以尾巴要跟着一起记。
           const tail = await readRunLogTail(markerId);
-          fail(
-            new Error(`run.sh 过早退出 code=${code} sig=${sig}${tail ? `: ${tail}` : ""}`),
-            false
-          );
+          // String() 而不是把值直接递进去：code / sig 总有一个是 null，而 i18next 把 null
+          // 插成空串 —— "sig=null" 会缩成 "sig="，丢掉的正是「自己退的还是被信号打死的」。
+          const why = $t("TXT_CODE_RUNNER_EXITED_EARLY", {
+            code: String(code),
+            sig: String(sig)
+          });
+          // 尾巴是 run.sh 自己的输出，翻不了也不该进词条；拼进来的只有中间那个分隔符。
+          fail(new Error(tail ? `${why}: ${tail}` : why), false);
         })();
       });
       child.unref(); // 不让这个 ChildProcess 一直吊着事件循环
@@ -363,7 +367,7 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
       // 于是 owns() 首句恒假 —— UI 恒 idle、stop 一个信号都不发、reconcile 每 15 秒重拉一次，
       // 而 failures 永远是 0，退避形同虚设。
       if (typeof child.pid !== "number") {
-        fail(new Error("spawn 未返回 pid"), true);
+        fail(new Error($t("TXT_CODE_RUNNER_SPAWN_NO_PID")), true);
         throw new Error($t("TXT_CODE_RUNNER_SPAWN_FAILED", { dir: key }));
       }
       // 只更新「这次拉起」相关的两个字段。**failures 不在这里清零**：spawn 返回了 pid 只说明

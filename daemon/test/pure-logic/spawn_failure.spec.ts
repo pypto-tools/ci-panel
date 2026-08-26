@@ -14,6 +14,13 @@ import { fakeChild, fakeDeps, listenerProc, makeRunner } from "../helpers/proces
 // uncaughtException, which app.ts swallows into a log line — so a create would report success
 // while nothing is running.
 
+// lastError is not log-only: observationFor carries it to the panel as
+// RunnerRuntimeState.detail, which is the only line a user ever sees about a start that
+// failed. So it is user-facing text and has to come from the catalogue rather than a literal
+// — it used to reach every panel as Chinese whatever the daemon's configured language was.
+// No test calls changeLanguage, so the locale here is the init default in src/i18n, en_us.
+const CJK = /[一-鿿]/;
+
 const fixture = makeRunner("spawn-failure");
 
 beforeEach(async () => {
@@ -50,6 +57,7 @@ describe("a spawn that never produced a process", () => {
     await flush();
     const rt = await readRuntime(fixture.markerId);
     expect(rt?.lastError).toBeTruthy();
+    expect(rt?.lastError).not.toMatch(CJK);
     // Never a half-written record: a missing pgid key would make owns() false forever, so the UI
     // would read idle, stop would send nothing, and the tick would respawn every 15 seconds.
     expect(rt?.pgid).toBe(0);
@@ -69,7 +77,12 @@ describe("a run.sh that exits on its own", () => {
     await flush();
     const rt = await readRuntime(fixture.markerId);
     expect(rt?.failures).toBe(1);
-    expect(rt?.lastError).toContain("过早退出");
+    expect(rt?.lastError).toContain("exited early");
+    // `sig=null` is what distinguishes "it walked out on its own" from "something killed it",
+    // and it only survives because the value is stringified before interpolation — i18next
+    // renders a null straight through as an empty string.
+    expect(rt?.lastError).toContain("code=0 sig=null");
+    expect(rt?.lastError).not.toMatch(CJK);
   });
 
   it("says what run.sh printed on its way out", async () => {

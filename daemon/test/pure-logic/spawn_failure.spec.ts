@@ -19,6 +19,11 @@ import { fakeChild, fakeDeps, listenerProc, makeRunner } from "../helpers/proces
 // failed. So it is user-facing text and has to come from the catalogue rather than a literal
 // — it used to reach every panel as Chinese whatever the daemon's configured language was.
 // No test calls changeLanguage, so the locale here is the init default in src/i18n, en_us.
+//
+// Only for the paths where lastError is catalogue text and nothing else. The early-exit path
+// appends the run log tail, which is run.sh's own output and deliberately untranslated — a
+// runner that prints Chinese would carry CJK there by design, so this must not be pointed at
+// the joined string.
 const CJK = /[一-鿿]/;
 
 const fixture = makeRunner("spawn-failure");
@@ -77,12 +82,13 @@ describe("a run.sh that exits on its own", () => {
     await flush();
     const rt = await readRuntime(fixture.markerId);
     expect(rt?.failures).toBe(1);
-    expect(rt?.lastError).toContain("exited early");
-    // `sig=null` is what distinguishes "it walked out on its own" from "something killed it",
-    // and it only survives because the value is stringified before interpolation — i18next
-    // renders a null straight through as an empty string.
-    expect(rt?.lastError).toContain("code=0 sig=null");
-    expect(rt?.lastError).not.toMatch(CJK);
+    // rotateAndOpenRunLog gives every spawn a fresh log and this child writes nothing, so
+    // there is no tail to append: lastError is the resolved catalogue sentence exactly. Pin
+    // the whole string — that covers the wording, the fact that it is not a Chinese literal,
+    // and `sig=null`, which only survives because the value is stringified before
+    // interpolation (i18next renders a null straight through as an empty string) and is what
+    // separates "it walked out on its own" from "something killed it".
+    expect(rt?.lastError).toBe("run.sh exited early, code=0 sig=null");
   });
 
   it("says what run.sh printed on its way out", async () => {
@@ -104,6 +110,9 @@ describe("a run.sh that exits on its own", () => {
     // Blank trailing lines are what a real exit leaves behind; keeping them would push the one
     // sentence that matters out of a length-capped field.
     expect(rt?.lastError).toContain("Exiting runner...");
+    // The tail is appended to the catalogue sentence, not substituted for it: without the
+    // prefix the panel would show log output with nothing saying what happened.
+    expect(rt?.lastError).toMatch(/^run\.sh exited early, code=0 sig=null: /);
   });
 
   it("does not count an exit after a long healthy run", async () => {

@@ -217,6 +217,16 @@ const PH = {
     "每行一个 KEY=VALUE，如\nASCEND_RT_VISIBLE_DEVICES={{(index-1)*4}}-{{(index-1)*4+3}}"
 };
 
+// 占位符说明这一句要保留 <code> 排版，所以走 v-html（同 InstanceDetail.vue 的既有写法）：
+// 文案整句在词条里，译者能连着语序和标点一起改。插值只有 PH 里的编译期常量，没有用户输入。
+const placeholderTip = computed(() =>
+  t("TXT_CODE_RUNNER_ENV_TIP_PLACEHOLDERS", {
+    name: PH.name,
+    index: PH.index,
+    seq: PH.seq
+  })
+);
+
 // 某组某个目标的一份预览行；names 为空（数量还没填）时不预览。
 function previewLine(vars: EnvVar[], name: string, seq: number): string {
   const { vars: expanded, error } = expandEnvVars(vars, {
@@ -307,12 +317,21 @@ const defaultEnvRows = computed<DefaultEnvRow[]>(() => {
     // 而那恰好是这批变量最要紧的去处 —— 少了它 runner 连不上 GitHub。
     ...d.panel.map((v) => ({
       ...v,
-      from: "面板（代理，.env 与监听进程各一份）",
+      from: t("TXT_CODE_RUNNER_ENV_FROM_PANEL"),
       overridden: filled.has(v.key)
     })),
-    ...d.runner.map((v) => ({ ...v, from: "runner 注册时快照", overridden: filled.has(v.key) }))
+    ...d.runner.map((v) => ({
+      ...v,
+      from: t("TXT_CODE_RUNNER_ENV_FROM_RUNNER"),
+      overridden: filled.has(v.key)
+    }))
   ];
 });
+
+// 覆盖提示与来源标签渲染在同一行，两截分别取词条会让一种语言的半句接上另一种语言的半句，
+// 所以整句连着标点一起进词条，来源当参数传。
+const fromLabel = (r: DefaultEnvRow): string =>
+  r.overridden ? t("TXT_CODE_RUNNER_ENV_OVERRIDDEN", { from: r.from }) : r.from;
 
 // 把当前填的代理补进某组的监听进程变量框。daemon 置备时已经会自动写这几条，所以这个按钮
 // 剩下的用途是「让它显式可见」与「改成另一个地址」——填进来的同名变量赢。已有同名行不重复追加。
@@ -1214,11 +1233,7 @@ const statusColor = (s: string) =>
                 用上面的代理填充
               </a-button>
             </div>
-            <div class="env-tip">
-              写入 systemd 单元的 Environment=，进「监听进程」。代理这类要让 runner 连上 GitHub
-              的变量必须放这里——上面填的代理创建时会自动写入，这里只在要覆盖它时填。创建时写入，
-              并重启单元使其生效。
-            </div>
+            <div class="env-tip">{{ t("TXT_CODE_RUNNER_ENV_TIP_LISTENER") }}</div>
             <a-textarea
               v-model:value="g.envOverride"
               :auto-size="{ minRows: 2, maxRows: 8 }"
@@ -1229,10 +1244,7 @@ const statusColor = (s: string) =>
             <div class="env-head">
               <span class="env-title">运行时 .env</span>
             </div>
-            <div class="env-tip">
-              写入 runner 目录的 .env，只注入到 job/step 执行环境（不进监听进程）。设备号、库路径
-              这类放这里。创建时随注册一起写入，首个 job 即生效。
-            </div>
+            <div class="env-tip">{{ t("TXT_CODE_RUNNER_ENV_TIP_DOTENV") }}</div>
             <a-textarea
               v-model:value="g.envDotenv"
               :auto-size="{ minRows: 2, maxRows: 8 }"
@@ -1250,21 +1262,19 @@ const statusColor = (s: string) =>
               <div v-for="r in defaultEnvRows" :key="r.key" :class="{ dim: r.overridden }">
                 <span class="k">{{ r.key }}</span>=<span class="v">{{ r.value }}</span>
                 <span class="from">
-                  — {{ r.from }}{{ r.overridden ? "，已被你填的同名变量覆盖" : "" }}
+                  — {{ fromLabel(r) }}
                 </span>
               </div>
             </div>
           </div>
-          <div v-else-if="defaultEnvLoading" class="env-tip">正在读取会被自动写入的变量…</div>
+          <div v-else-if="defaultEnvLoading" class="env-tip">
+            {{ t("TXT_CODE_RUNNER_ENV_TIP_DEFAULT_LOADING") }}
+          </div>
 
           <div class="env-foot">
-            <span class="env-tip">
-              值里可用占位符按每个 runner 展开：<code>{{ PH.name }}</code> 全名、<code>{{
-                PH.index
-              }}</code>
-              名字里的编号、<code>{{ PH.seq }}</code> 本批序号（1 起）；支持
-              <code>+ - * / %</code> 与括号。
-            </span>
+            <!-- 文案来自词条，插值只有 PH 里的编译期常量，没有用户输入；理由见 placeholderTip -->
+            <!-- eslint-disable-next-line vue/no-v-html -->
+            <span class="env-tip" v-html="placeholderTip"></span>
             <a-button
               v-if="groups.length > 1"
               type="link"

@@ -128,13 +128,22 @@ Measured on systemd 249: all five hold.
 ## 4. Nodes without systemd
 
 A node running inside a container usually has no systemd, and the daemon already knows how to
-tell — this check is existing, shipped code:
+tell. But "has systemd" is not the condition that matters — the shipped check has **two** parts,
+and its own comment says so:
 
 ```ts
-// daemon/src/service/supervisor/systemd.ts:514
+// daemon/src/service/supervisor/systemd.ts:514-519
 if (!fs.existsSync("/run/systemd/system"))
   return { available: false, reason: "该节点不是 systemd 启动的（无 /run/systemd/system）" };
+// 光有 systemd 还不够：本项目的 systemd 路径全部经特权助手（写单元、启停、drop-in），
+// 助手不可用时那条路一步都走不通。
+if (!queryHelperPreflight())
+  return { available: false, reason: "特权助手不可用（未安装或未配免密 sudo）" };
 ```
+
+So a perfectly ordinary systemd host still has no usable systemd backend until
+`prod-scripts/install-runner-privileges.sh` has been run on it. **Deploying the helper is
+therefore a prerequisite for hosting plugins with isolation, not only for managing runners.**
 
 The repository already solves this shape for runners, and the mechanism is reusable as-is.
 `daemon/src/service/supervisor/registry.ts` holds a `Record<SupervisorKind, Factory>` in which
@@ -153,12 +162,19 @@ So there are three cases, not two:
 
 | Node | Backend | Isolation | Policy |
 | --- | --- | --- | --- |
-| systemd available | `systemd` | full — transient per-unit uid | preferred |
+| systemd backend available — systemd **and** the helper | `systemd` | full — transient per-unit uid | preferred |
 | no systemd, daemon runs as **root** | `process`, spawning with `{uid, gid}` onto a pre-created unprivileged user; the daemon chowns the run and state directories itself | comparable — uid separation preserved | viable |
 | no systemd, daemon unprivileged | `none` | **not achievable** | refuse by default |
 
 > The second and third rows are **policy, not current behaviour** — no plugin host backend exists
 > yet in either form.
+
+**A failed helper preflight must not fall through the way it does for runners.** When the helper
+is unusable, `systemdFactory.detect()` reports unavailable and, because the process backend is
+always available at a lower priority, a runner silently drops to `process`. That is the right
+behaviour for a runner and the wrong one for a plugin: the same silent drop would take the
+plugin's isolation with it. A plugin host reads that unavailability as "this node cannot isolate"
+and applies the third row's policy, rather than taking the next backend in the list.
 
 The middle case is genuine new work rather than a fallback that comes free. Nothing in
 `daemon/src` passes `uid` or `gid` to `spawn` today, so dropping privileges is a new capability.

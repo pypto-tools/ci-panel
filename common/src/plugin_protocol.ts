@@ -212,6 +212,22 @@ export interface PluginViewSpec {
   columns?: string[];
 }
 
+// 高度取的是 frontend LayoutCardHeight 的**枚举名**，不是 CSS 值：让插件填
+// "100px" 这种自由字符串，等于把一个它说了算的值直接送进 style 属性。
+export type PluginCardHeight = "MINI" | "SMALL" | "MEDIUM" | "BIG" | "LARGE" | "AUTO";
+
+export const PLUGIN_CARD_HEIGHTS: readonly PluginCardHeight[] = [
+  "MINI",
+  "SMALL",
+  "MEDIUM",
+  "BIG",
+  "LARGE",
+  "AUTO"
+] as const;
+
+// 布局是 12 栅格（ant 的 a-col span），所以宽度是 1..12 的整数而不是任意数。
+export const PLUGIN_CARD_MAX_WIDTH = 12;
+
 export interface PluginCardSpec {
   id: string;
   // 引用 views[].id
@@ -219,7 +235,7 @@ export interface PluginCardSpec {
   // 标题走 i18n 键，不是字面文案。
   title: string;
   width?: number;
-  height?: string;
+  height?: PluginCardHeight;
 }
 
 export interface PluginPageSpec {
@@ -270,7 +286,13 @@ const KNOWN_TOP_LEVEL_KEYS = new Set([
   "i18n"
 ]);
 
-const SEMVER_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+// semver.org 给出的官方正则。自己手写的宽松版有两头都错的毛病：会误拒合法的
+// build metadata（1.2.3+linux.x64），又会放行非法的空预发布标识（1.2.3-alpha..1）。
+// 这一点在契约里比别处更要紧 —— 被冻结的不只是字段，还有「接受哪些输入」：
+// 今天放宽了将来收紧就是破坏性变更，今天误拒了将来放宽反而是安全的。
+const SEMVER_PATTERN =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
+const VERSION_MAX_LENGTH = 64;
 // 清单内部的引用 id（data/views/cards/pages 互指）比插件 id 宽一格，允许下划线：
 // 它们不会变成目录名或 systemd 单元名，只在清单内部解析。插件 id 不放开下划线，
 // 是因为它要参与 i18n 键的拼接，而那里下划线是分隔符。
@@ -289,6 +311,14 @@ function isRef(v: unknown): v is string {
     !HAZARDOUS_KEYS.has(v) &&
     REF_PATTERN.test(v)
   );
+}
+
+// rejectUnknown 只管字段名。字段**值**也必须逐个收窄，否则结尾那句
+// `raw as unknown as PluginManifest` 就是在撒谎：limits.memoryMB 会被声明成 number
+// 而实际是 "unlimited"，然后原样拼进 systemd 单元的 MemoryMax=。
+function isPositiveInt(v: unknown, max?: number): v is number {
+  if (typeof v !== "number" || !Number.isInteger(v) || v <= 0) return false;
+  return max === undefined || v <= max;
 }
 
 function isI18nKey(v: unknown): v is string {
@@ -328,8 +358,12 @@ export function validatePluginManifest(raw: unknown): PluginManifestValidation {
   if (verdict !== "ok") err(`contract ${String(raw.contract)} is ${verdict}`);
 
   if (!isValidPluginId(raw.id)) err("id must match ^[a-z0-9]+(-[a-z0-9]+)*$ and be 1-64 chars");
-  if (typeof raw.version !== "string" || !SEMVER_PATTERN.test(raw.version)) {
-    err("version must be a semver string");
+  if (
+    typeof raw.version !== "string" ||
+    raw.version.length > VERSION_MAX_LENGTH ||
+    !SEMVER_PATTERN.test(raw.version)
+  ) {
+    err("version must be a semver 2.0 string");
   }
   if (!isI18nKey(raw.displayName)) err("displayName must be an i18n key ([A-Za-z0-9_]{1,64})");
 
@@ -348,6 +382,12 @@ export function validatePluginManifest(raw: unknown): PluginManifestValidation {
       err("runtime.limits must be an object when present");
     } else if (isPlainObject(raw.runtime.limits)) {
       rejectUnknown(raw.runtime.limits, ["memoryMB", "cpuPercent", "tasks"], "runtime.limits", err);
+      // 上界由 ci-panel 在下发时夹逼，清单说了不算；这里只保证它是个正整数，
+      // 因为这三个值会原样变成 MemoryMax= / CPUQuota= / TasksMax=。
+      for (const f of ["memoryMB", "cpuPercent", "tasks"] as const) {
+        const v = raw.runtime.limits[f];
+        if (v !== undefined && !isPositiveInt(v)) err(`runtime.limits.${f} must be a positive integer`);
+      }
     }
     rejectUnknown(raw.runtime, ["kind", "entry", "limits"], "runtime", err);
   }
@@ -402,6 +442,12 @@ export function validatePluginManifest(raw: unknown): PluginManifestValidation {
         if (!isRef(c.view)) err(`cards[${i}].view is missing or malformed`);
         else if (!viewIds.has(c.view)) err(`cards[${i}].view references unknown view: ${c.view}`);
         if (!isI18nKey(c.title)) err(`cards[${i}].title must be an i18n key`);
+        if (c.width !== undefined && !isPositiveInt(c.width, PLUGIN_CARD_MAX_WIDTH)) {
+          err(`cards[${i}].width must be an integer between 1 and ${PLUGIN_CARD_MAX_WIDTH}`);
+        }
+        if (c.height !== undefined && !PLUGIN_CARD_HEIGHTS.includes(c.height as PluginCardHeight)) {
+          err(`cards[${i}].height must be one of ${PLUGIN_CARD_HEIGHTS.join(" | ")}`);
+        }
       });
     }
   }

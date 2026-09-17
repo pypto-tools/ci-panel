@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   PLUGIN_BADGE_TONES,
+  PLUGIN_CARD_HEIGHTS,
   PLUGIN_CONTRACT_CURRENT,
   PLUGIN_CONTRACT_MIN_SUPPORTED,
   PLUGIN_ERROR_CODES,
@@ -234,6 +235,45 @@ describe("manifest validation: hostile input", () => {
       { id: "queue", render: "table", source: "pending", columns: [], chart: { x: "a" } } as never
     ];
     expect(errorsFor(m).some((e) => e.includes("views[0].chart"))).toBe(true);
+  });
+
+  it("accepts semver build metadata and rejects an empty prerelease identifier", () => {
+    // 被冻结的不只是字段，还有「接受哪些输入」：今天放宽，将来收紧就是破坏性变更。
+    // 手写的宽松正则两头都错 —— 误拒 1.2.3+linux.x64，又放行 1.2.3-alpha..1。
+    for (const good of ["1.2.3", "1.2.3+linux.x64", "0.1.0-rc.1", "1.0.0-alpha.beta"]) {
+      const m = validManifest();
+      m.version = good;
+      expect(validatePluginManifest(m).ok, good).toBe(true);
+    }
+    for (const bad of ["v1.2.3", "1.2", "1.2.3-alpha..1", "01.2.3", "1.2.3-", "x".repeat(70)]) {
+      const m = validManifest();
+      m.version = bad;
+      expect(validatePluginManifest(m).ok, bad).toBe(false);
+    }
+  });
+
+  it("narrows optional field values, not merely their names", () => {
+    // rejectUnknown 只看字段名。少了值的收窄，结尾那句 as PluginManifest 就是在撒谎：
+    // memoryMB 会被声明成 number 而实际是字符串，然后原样进 systemd 的 MemoryMax=。
+    const limits = validManifest();
+    limits.runtime = { kind: "process", entry: "bin/server", limits: { memoryMB: "unlimited" } } as never;
+    expect(errorsFor(limits).some((e) => e.includes("memoryMB"))).toBe(true);
+
+    const width = validManifest();
+    width.cards = [{ id: "queue_card", view: "queue", title: "CARD_TITLE", width: "wide" }] as never;
+    expect(errorsFor(width).some((e) => e.includes("width"))).toBe(true);
+
+    const tooWide = validManifest();
+    tooWide.cards = [{ id: "queue_card", view: "queue", title: "CARD_TITLE", width: 13 }] as never;
+    expect(errorsFor(tooWide).some((e) => e.includes("width"))).toBe(true);
+  });
+
+  it("rejects a raw CSS value where a card height name is required", () => {
+    // 自由字符串会直接进 style 属性，而它由不受信作者提供。
+    expect([...PLUGIN_CARD_HEIGHTS]).toEqual(["MINI", "SMALL", "MEDIUM", "BIG", "LARGE", "AUTO"]);
+    const m = validManifest();
+    m.cards = [{ id: "queue_card", view: "queue", title: "CARD_TITLE", height: "100px" }] as never;
+    expect(errorsFor(m).some((e) => e.includes("height"))).toBe(true);
   });
 
   it("rejects a non-object manifest without throwing", () => {

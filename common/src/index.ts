@@ -56,6 +56,7 @@ export type {
   ContractVerdict,
   PluginBadgeTone,
   PluginCardSpec,
+  PluginCardHeight,
   PluginCell,
   PluginDataPayload,
   PluginDataSourceSpec,
@@ -79,6 +80,8 @@ export type {
 
 export {
   PLUGIN_BADGE_TONES,
+  PLUGIN_CARD_HEIGHTS,
+  PLUGIN_CARD_MAX_WIDTH,
   PLUGIN_CONTRACT_CURRENT,
   PLUGIN_CONTRACT_MIN_SUPPORTED,
   PLUGIN_ERROR_CODES,

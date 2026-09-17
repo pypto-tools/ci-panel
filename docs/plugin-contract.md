@@ -93,6 +93,13 @@ the upper bound; the manifest does not get the last word.
 `"container"` will join the `kind` union if node-hosted containers are ever supported. It will be
 a new member of that union, not a new field.
 
+**How the host runs your process is not your concern, with one exception.** A node with systemd
+runs it as a unit with a transient uid; a container node without systemd runs it differently. You
+bind the socket path you are given and write to the state directory you are given either way. The
+exception is that a node which can provide no isolation at all will refuse to host a plugin
+declaring secrets, so such a plugin is simply unavailable there rather than running unprotected.
+See [plugin-operations.md](plugin-operations.md) §4.
+
 ### 3.3 `data` — what the plugin serves
 
 ```jsonc

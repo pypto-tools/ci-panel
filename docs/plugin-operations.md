@@ -4,9 +4,10 @@ For operators running ci-panel: how a plugin is hosted, what contains it, and ho
 yourself of that on your own hardware.
 
 > **Status.** §1–§3 are **settled and measured** — the isolation model was verified end to end on
-> a real host, and §3 is a procedure you can re-run to verify it on yours. §4 onward is
-> **designed but not implemented**; it is recorded here so the shape is agreed before the code
-> exists, and is marked accordingly.
+> a real host, and §3 is a procedure you can re-run to verify it on yours. §4 mixes verified facts
+> about the existing supervisor registry with plugin policy that is not yet implemented, and says
+> which is which. §5 onward is **designed but not implemented**; it is recorded here so the shape
+> is agreed before the code exists, and is marked accordingly.
 
 ## 1. Why the isolation model looks the way it does
 
@@ -124,12 +125,67 @@ afterwards.
 
 Measured on systemd 249: all five hold.
 
+## 4. Nodes without systemd
+
+A node running inside a container usually has no systemd, and the daemon already knows how to
+tell — this check is existing, shipped code:
+
+```ts
+// daemon/src/service/supervisor/systemd.ts:514
+if (!fs.existsSync("/run/systemd/system"))
+  return { available: false, reason: "该节点不是 systemd 启动的（无 /run/systemd/system）" };
+```
+
+The repository already solves this shape for runners, and the mechanism is reusable as-is.
+`daemon/src/service/supervisor/registry.ts` holds a `Record<SupervisorKind, Factory>` in which
+each backend self-reports availability, a reason and a priority; a node picks the highest-priority
+available one. Adding a backend is one row, and `satisfies` turns a forgotten row into a compile
+error rather than a backend that silently becomes dead code. Root container nodes are already a
+supported deployment shape (`edb35fc8`).
+
+**For a runner the two backends are equivalent; for a plugin they are not.** For a runner,
+systemd versus process is a question of who supervises the process. For a plugin, systemd *is*
+the isolation — `DynamicUser=`, `Group=`, `RuntimeDirectory` and `UMask` are the entire
+mechanism. A daemon that merely forks a plugin runs it **as the daemon's own uid**, which is
+exactly what §1 says must not happen.
+
+So there are three cases, not two:
+
+| Node | Backend | Isolation | Policy |
+| --- | --- | --- | --- |
+| systemd available | `systemd` | full — transient per-unit uid | preferred |
+| no systemd, daemon runs as **root** | `process`, spawning with `{uid, gid}` onto a pre-created unprivileged user; the daemon chowns the run and state directories itself | comparable — uid separation preserved | viable |
+| no systemd, daemon unprivileged | `none` | **not achievable** | refuse by default |
+
+> The second and third rows are **policy, not current behaviour** — no plugin host backend exists
+> yet in either form.
+
+The middle case is genuine new work rather than a fallback that comes free. Nothing in
+`daemon/src` passes `uid` or `gid` to `spawn` today, so dropping privileges is a new capability.
+It is available at all only because the parent is root: an unprivileged process cannot change its
+uid, which is precisely why the third row cannot be solved the same way.
+
+**The third case must refuse rather than degrade.** Running a plugin with no isolation because
+the node cannot provide any is the failure mode this whole model exists to prevent, and doing it
+silently is worse than not supporting the node. The precedent is already there — the `none`
+backend exists to say "this node cannot do it" — and the planned `plugin/capabilities` verb is
+where a node reports that upward. Two rules for this case:
+
+- Hosting is refused unless an operator explicitly opts in for that node.
+- A plugin declaring secrets is refused outright even then, because its credentials would sit
+  under the daemon's uid, which is the exposure isolation exists to close.
+
+**Not investigated:** whether an unprivileged daemon could obtain a uid mapping through a user
+namespace (`unshare -U`), the way rootless container runtimes do. It depends on kernel
+configuration and has not been tested here. It is worth a probe when a node of that shape
+actually exists, not before — §3 is the template for that probe.
+
 ---
 
 > Everything below is **designed, not implemented**. It records agreed shape, not current
 > behaviour.
 
-## 4. Lifecycle (pending)
+## 5. Lifecycle (pending)
 
 Install (admin supplies the manifest) → **disabled by default** → approve declared grants →
 select target nodes → daemon creates the unit → start → health probe → ready.
@@ -140,7 +196,7 @@ select target nodes → daemon creates the unit → start → health probe → r
 - A plugin outside the contract window is marked `deprecated` and keeps running for two minor
   versions. Only `too-new` is hard-quarantined.
 
-## 5. Uninstall (pending)
+## 6. Uninstall (pending)
 
 An ordered, idempotent sequence: stop the unit → remove the unit → remove the run and state
 directories → confirm secrets and dead-letter data separately, since both may be wanted for
@@ -150,7 +206,7 @@ still point at the plugin and let the admin trigger a prune with a dry-run count
 Never prune layouts silently: a temporarily disabled plugin would lose the operator's card
 placement.
 
-## 6. Backup and upgrade (pending)
+## 7. Backup and upgrade (pending)
 
 `deploy/update.sh` archives `data/` before upgrading, excluding `InstanceData`, `runner-pkg` and
 `InstanceLog`. Plugin manifests, the registry **and** secrets are to be included; plugin payload
@@ -160,7 +216,7 @@ Secrets ride the protection the script already applies to the node access key in
 `Config/global.json` — `umask 077` before `mkdir`, then `chmod 600` on the archive — so this adds
 no exposure beyond the status quo.
 
-## 7. Logs (pending)
+## 8. Logs (pending)
 
 A plugin's stdout and stderr go to the journal under its unit name. A `plugin/logs` verb, a panel
 route and a UI drawer are planned; until they exist, quarantine can report that a plugin

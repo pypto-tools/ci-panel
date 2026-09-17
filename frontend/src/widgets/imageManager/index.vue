@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, h } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { t } from "@/lang/i18n";
 import { Modal, notification } from "ant-design-vue";
 import CardPanel from "@/components/CardPanel.vue";
 import BetweenMenus from "@/components/BetweenMenus.vue";
 import { useScreen } from "@/hooks/useScreen";
 import { arrayFilter } from "@/tools/array";
+import { buildDockerDetailContent } from "@/tools/dockerDetail";
 import { useLayoutCardTools } from "@/hooks/useCardTools";
 import { imageList, containerList } from "@/services/apis/envImage";
 import type { LayoutCard, ImageInfo, ContainerInfo } from "@/types";
@@ -75,20 +76,11 @@ const imageColumns = computed(() => {
   ]);
 });
 
-const showDetail = (info: ImageInfo) => {
+const showDetail = (info: ImageInfo | ContainerInfo) => {
   Modal.info({
     centered: true,
     closable: true,
-    content: [
-      h("p", t("TXT_CODE_bbd7d448")),
-      h("pre", {
-        innerHTML: JSON.stringify(info, null, 4),
-        style: {
-          maxHeight: "460px",
-          overflow: "auto"
-        }
-      })
-    ],
+    content: buildDockerDetailContent(info, t("TXT_CODE_bbd7d448")),
     title: t("TXT_CODE_9d820cb4"),
     width: 500
   });

@@ -50,6 +50,51 @@ export type {
 // 所以浏览器 bundle 不受影响。
 export { collectRegisteredRepoSlugs } from "./runner_protocol";
 
+// 插件契约（三方共用 + 仓库外的插件作者按同一份实现）。类型给前端 import type 用；
+// 下面那组运行时导出只有 panel 与 daemon 会引，前端不引，浏览器 bundle 不受影响。
+export type {
+  ContractVerdict,
+  PluginBadgeTone,
+  PluginCardSpec,
+  PluginCell,
+  PluginDataPayload,
+  PluginDataSourceSpec,
+  PluginErrorCode,
+  PluginErrorReply,
+  PluginHealthPayload,
+  PluginHealthStatus,
+  PluginI18nCatalogues,
+  PluginManifest,
+  PluginManifestValidation,
+  PluginOkReply,
+  PluginPageSpec,
+  PluginRenderKind,
+  PluginReply,
+  PluginResourceLimits,
+  PluginRow,
+  PluginRuntimeKind,
+  PluginRuntimeSpec,
+  PluginViewSpec
+} from "./plugin_protocol";
+
+export {
+  PLUGIN_BADGE_TONES,
+  PLUGIN_CONTRACT_CURRENT,
+  PLUGIN_CONTRACT_MIN_SUPPORTED,
+  PLUGIN_ERROR_CODES,
+  PLUGIN_ID_MAX_LENGTH,
+  PLUGIN_ID_PATTERN,
+  PLUGIN_I18N_KEY_PATTERN,
+  PLUGIN_I18N_PREFIX,
+  PLUGIN_RENDER_KINDS,
+  PLUGIN_TEXT_MAX_LENGTH,
+  checkContract,
+  isSafeI18nValue,
+  isValidPluginId,
+  pluginI18nKey,
+  validatePluginManifest
+} from "./plugin_protocol";
+
 export { removeTrail } from "./string_utils";
 
 export {

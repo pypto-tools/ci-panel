@@ -293,6 +293,80 @@ daemon 只在**启动时**加载实例，所以必须重启才生效。日志里
 彻底重来也是一个选择：删掉各 runner 目录下的 `.cipanel`，再从面板重新导入 —— 代价是
 marker 里记的 group 和注册标签会丢。
 
+## 给节点控制面预留 CPU
+
+节点机器把 CPU 吃到 100% 是常态。单元模板里已经带了三条设置，装完即生效：
+`Nice=-10`（约 9 倍于普通任务的 CFS 权重）、`CPUWeight=1000`、`OOMScoreAdjust=-800`。
+对一个稳态用不到一个核的控制面，这通常就够了。
+
+这三个值会被子进程继承。systemd 托管的 runner 在自己的单元里，不受影响。process 托管
+（`CIP_RUNNER_SUPERVISOR=process`，或特权助手不可用时自动退到它）下 run.sh 是 daemon 的
+子进程：daemon 会在 spawn 之后立刻把它调回 nice 0 / oom_score_adj 0，但**调不回 cgroup**——
+这些 runner 与 daemon 同在一个 cgroup 里，共享那份 `CPUWeight=1000`。
+
+**先确认 daemon 慢是不是真的因为抢不到 CPU。** 面板显示节点不可用，更常见的原因是
+daemon 自己在做阻塞的活儿，而不是被饿着。先看 `daemon/logs/current.log` 里的资源报告和
+`systemd-cgtop`，再考虑下面这些。
+
+真要做硬预留（把若干个核只留给 ci-panel），**必须两边一起配**：只把 daemon 钉在 0-1 号核、
+却不把负载从这两个核上赶走，等于让它从「和 320 个核的负载竞争」变成「在 2 个核上和同样的
+负载竞争」——比不配更糟。
+
+先看这台机器是 cgroup v1 还是 v2：
+
+```bash
+stat -fc %T /sys/fs/cgroup     # cgroup2fs = v2；tmpfs = v1
+```
+
+### cgroup v2（systemd 244+）
+
+控制面侧，加 drop-in（不要改模板：核数因机器而异）：
+
+```bash
+sudo systemctl edit ci-panel-daemon.service
+```
+
+```ini
+[Service]
+AllowedCPUs=0-1
+```
+
+负载侧，把这两个核排除掉，按你的负载管理方式选一种：
+
+```ini
+# runner 的 systemd 单元（对 actions.runner-.slice 或逐个单元加 drop-in）
+[Service]
+AllowedCPUs=2-319
+```
+
+```bash
+docker run --cpuset-cpus=2-319 …            # docker
+kubelet --reserved-cpus=0,1                  # kubernetes，配 cpuManagerPolicy=static
+```
+
+### cgroup v1
+
+systemd 的 `AllowedCPUs=` 在 v1 上**会被静默忽略**（它要 v2 的 cpuset 控制器）。用
+`taskset` 代替：
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/bin/taskset -c 0-1 /path/to/node --enable-source-maps --max-old-space-size=8192 app.js
+```
+
+（`ExecStart=` 空行是必须的：drop-in 里不清空就变成追加第二条启动命令。路径要和
+`/etc/systemd/system/ci-panel-daemon.service` 里那条一致。）
+
+负载侧同样用 `--cpuset-cpus`（docker）或给它们的启动命令套 `taskset -c 2-319`。
+
+### 不建议：实时调度
+
+`CPUSchedulingPolicy=fifo` 确实能抢在所有普通任务之前，但它作用于进程的**全部线程**，包括
+`UV_THREADPOOL_SIZE` 那 32 个正在扫 `/proc` 的线程。任何一个线程忙等都会拖住整台机器
+（内核默认只留 5% 给非实时任务兜底）。对一个 I/O 密集的控制面，它比 `Nice=-10` 多不了多少
+收益，炸的范围却是整台机器。
+
 ## 排障
 
 | 现象 | 先查这里 |

@@ -107,6 +107,8 @@ describe("completeness", () => {
       "TXT_CODE_REPO_AUTO_REGISTER_IMPORT",
       "TXT_CODE_REPO_AUTO_REGISTER_PROVISION",
       "TXT_CODE_NODE_AUTH_REJECTED",
+      "TXT_CODE_daemonInfo.authRetry",
+      "TXT_CODE_daemonInfo.reconnect",
       "TXT_CODE_RUNNER_EXPLORER_NODES",
       "TXT_CODE_RUNNER_EXPLORER_RUNNERS",
       "TXT_CODE_RUNNER_EXPLORER_LOAD_FAILED",

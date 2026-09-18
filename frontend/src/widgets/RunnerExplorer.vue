@@ -202,19 +202,21 @@ async function load(silent = false) {
   if (silent) return;
 
   // 每一路各报一条，说清楚是哪一路失败了：runner 列表超时多半是某个节点扫描慢，而节点本身
-  // 是好的。首次加载时没有"上一次的数据"可留，别承诺一个界面上并不存在的东西。
-  const hasStale = Boolean(repoData.value || nodes.value);
-  const key = hasStale
-    ? "TXT_CODE_RUNNER_EXPLORER_LOAD_FAILED_STALE"
-    : "TXT_CODE_RUNNER_EXPLORER_LOAD_FAILED";
+  // 是好的。「显示的是上一次的数据」只在**失败的那一路**真有旧数据时才说 —— 首次加载时节点列表
+  // 成功、runner 列表失败，界面上并没有任何旧的 runner 数据，别承诺一个不存在的东西。
+  const report = (what: string, reason: unknown, hasStale: boolean) =>
+    message.error(
+      t(
+        hasStale
+          ? "TXT_CODE_RUNNER_EXPLORER_LOAD_FAILED_STALE"
+          : "TXT_CODE_RUNNER_EXPLORER_LOAD_FAILED",
+        { what, reason: errText(reason) }
+      )
+    );
   if (nodesResult.status === "rejected")
-    message.error(
-      t(key, { what: t("TXT_CODE_RUNNER_EXPLORER_NODES"), reason: errText(nodesResult.reason) })
-    );
+    report(t("TXT_CODE_RUNNER_EXPLORER_NODES"), nodesResult.reason, Boolean(nodes.value));
   if (reposResult.status === "rejected")
-    message.error(
-      t(key, { what: t("TXT_CODE_RUNNER_EXPLORER_RUNNERS"), reason: errText(reposResult.reason) })
-    );
+    report(t("TXT_CODE_RUNNER_EXPLORER_RUNNERS"), reposResult.reason, Boolean(repoData.value));
 }
 
 function errText(err: unknown): string {

@@ -7,6 +7,12 @@ import { $t } from "../i18n";
 import { UniversalRemoteSubsystem } from "./base/urs";
 import { logger } from "./log";
 
+// 巡检日志里标识一个节点：备注 + 地址。与 RemoteService 自己的 getDaemonInfo 不同，这里不带
+// uuid/URL —— 巡检每 20 秒一拍，行短一点才看得过来。
+function nodeLabel(v: RemoteService): string {
+  return `${v.config.remarks} ${v.config.ip}:${v.config.port}`;
+}
+
 // The RemoteServiceSubsystem will be one of the most important systems
 // main function is to store remote services everywhere
 // Scan local services, unified management, remote calls and proxies, etc.
@@ -71,6 +77,7 @@ class RemoteServiceSubsystem extends UniversalRemoteSubsystem<RemoteService> {
     if (this.getInstance(uuid)) {
       this.getInstance(uuid)?.disconnect();
       this.deleteInstance(uuid);
+      this.lastRejectedRetryAt.delete(uuid);
       await Storage.getStorage().delete("RemoteServiceConfig", uuid);
     }
   }
@@ -150,9 +157,7 @@ class RemoteServiceSubsystem extends UniversalRemoteSubsystem<RemoteService> {
       // 不走 connect()：那会把连接整个拆了重建，顺带清掉 socket.io 自己的重连退避状态，
       // 在一台本来就慢的机器上等于把恢复推得更远。
       if (v.socket?.connected) {
-        logger.warn(
-          `Daemon connected but not authenticated: ${v.config.remarks} ${v.config.ip}:${v.config.port}, retrying auth...`
-        );
+        logger.warn($t("TXT_CODE_daemonInfo.authRetry", { v: nodeLabel(v) }));
         // auth() 自己记录所有失败，正常不会 reject；这个 catch 兜的是将来的签名变化——
         // 未处理的 rejection 会让整个面板进程退出。记一行而不是吞掉，出了事查得到。
         void v.auth().catch((err: unknown) => logger.warn(err));
@@ -170,9 +175,7 @@ class RemoteServiceSubsystem extends UniversalRemoteSubsystem<RemoteService> {
         if (Date.now() - last < RemoteServiceSubsystem.REJECTED_RETRY_INTERVAL) return;
         this.lastRejectedRetryAt.set(v.uuid, Date.now());
       }
-      logger.warn(
-        `Daemon exception detected: ${v.config.remarks} ${v.config.ip}:${v.config.port}, reconnecting...`
-      );
+      logger.warn($t("TXT_CODE_daemonInfo.reconnect", { v: nodeLabel(v) }));
       v.connect();
     });
   }

@@ -45,7 +45,7 @@ export default class RemoteRequest {
         // 密钥被节点拒了是个完全不同的故障：说清楚，别让人照着「检查远程节点状态」去查一台
         // 好端端的机器。真实原因原本只写在面板日志里，界面上一个字都看不到。
         if (this.rService.authRejected)
-          throw new Error($t("TXT_CODE_NODE_AUTH_REJECTED") + ` IP: ${this.rService.config.ip}`);
+          throw new Error($t("TXT_CODE_NODE_AUTH_REJECTED", { ip: this.rService.config.ip }));
         throw new Error($t("TXT_CODE_b7d38e78") + ` IP: ${this.rService.config.ip}`);
       }
     }

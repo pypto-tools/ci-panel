@@ -100,6 +100,22 @@ export default class RemoteService {
     this.available = true;
     this.authRejected = false;
     this.lastAvailableAt = Date.now();
+    this.wakeReadyWaiters();
+  }
+
+  /**
+   * 节点明确拒绝了密钥：这是终局，等下去不会有别的结果。
+   *
+   * 必须唤醒正在等的请求。它们是在「连接刚断、正在重连」时开始等的，那时判断值得等；
+   * 现在答案出来了，不叫醒的话每个请求都要熬满等待上限，才能报出这条早就确定的错误。
+   */
+  public markAuthRejected() {
+    this.authRejected = true;
+    this.markUnavailable();
+    this.wakeReadyWaiters();
+  }
+
+  private wakeReadyWaiters() {
     // 复制一份再遍历：唤醒回调会把自己从集合里摘掉。
     for (const wake of [...this.readyWaiters]) wake();
   }
@@ -219,13 +235,18 @@ export default class RemoteService {
       }
       // 节点明确回了「不是」：密钥不符，或没过它的 IP 白名单。重试和等待都改变不了结果，
       // 记下来，让请求侧能报出真正的原因，而不是笼统的「节点不可用」。
-      this.authRejected = true;
-      this.markUnavailable();
+      this.markAuthRejected();
       logger.warn($t("TXT_CODE_daemonInfo.authFailure", { v: daemonInfo }));
       return false;
     } catch (error: any) {
-      // 超时或连接断了——这是**暂时**的失败，不能置 authRejected：置了就等于把一次高负载
-      // 下的超时永久判成「密钥不对」，此后请求全部快速失败，再也不肯等它恢复。
+      // 超时或连接断了——这是**暂时**的失败，它对密钥什么也没说。所以不但不能置 authRejected，
+      // 还要把上一次留下的清掉：留着就等于把一次高负载下的超时判成「密钥不对」——请求会快速
+      // 失败、报错会说错原因、巡检还会按被拒节点的慢节奏去重连。
+      //
+      // 刻意在这里清而不是在 auth() 入口清：入口就清的话，一次仍会被拒的重试在飞的那十几秒里，
+      // 节点看起来「没被拒」，报错会在两种文案之间来回闪。三条出口各自给出明确的结论：
+      // 通过（markAvailable）、被拒（markAuthRejected）、说不清（这里）。
+      this.authRejected = false;
       logger.warn($t("TXT_CODE_daemonInfo.authError", { v: daemonInfo }));
       logger.warn(error);
       return false;

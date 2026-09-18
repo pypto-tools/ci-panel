@@ -35,7 +35,7 @@ import {
 import { dirKey, withRunnerLock } from "./runner_lock";
 import { $t } from "../i18n";
 import { canonicalPath } from "../tools/path_link_check";
-import { singleFlight } from "../utils/single_flight";
+import { singleFlight, singleFlightBy } from "../utils/single_flight";
 import { legacyManagedBy, legacySystemdState } from "./supervisor/legacy";
 import { scanListenerProcs } from "./supervisor/local_procs";
 import { toRuntimeState } from "./supervisor/ownership";
@@ -398,12 +398,26 @@ export function managedRunnerDirs(): string[] {
 //
 // 刻意不给 ttlMs：只合并**并发**调用，不缓存已完成的结果。纳管 / 取消纳管之后前端会立刻重拉
 // 列表，缓存一份哪怕只有几秒的旧结果，都会让刚导入的 runner 在界面上"没出现"。
-export const scanManagedRunners = singleFlight(async (): Promise<ScanResult> => {
-  const runners = await buildRunners(managedRunnerDirs());
-  runners.forEach(reconcileHandle); // 幂等：顺手修早期句柄实例遗留的启动命令
-  logger.info(`[runner-scan] 已纳管（经句柄实例发现）：${runners.length} 个`);
-  return { roots: [], runners, errors: [] };
-});
+//
+// **按目录集合合并，不是无条件合并。** 光去掉 TTL 还不够：一轮扫描进行中时完成了一次纳管，
+// 紧接着到来的请求若加入那一轮，拿到的就是纳管之前的目录集合 —— 窗口更小，但正是上面那个
+// 「刚导入的 runner 没出现」。纳管与取消纳管都会改变 managedRunnerDirs() 的结果（写/删 .cipanel、
+// 建句柄实例），所以把它当 key：集合变了就是新的一轮，没变才共享。managedRunnerDirs() 本身
+// 只是遍历句柄实例 + 逐个 existsSync，比它省下的那一轮 /proc 扫描便宜几个数量级。
+const scanManagedDirs = singleFlightBy(
+  // 排序只用于 key：同一个集合不该因为实例表的遍历顺序不同而被当成两轮
+  (dirs: string[]) => [...dirs].sort().join("\0"),
+  async (dirs: string[]): Promise<ScanResult> => {
+    const runners = await buildRunners(dirs);
+    runners.forEach(reconcileHandle); // 幂等：顺手修早期句柄实例遗留的启动命令
+    logger.info(`[runner-scan] 已纳管（经句柄实例发现）：${runners.length} 个`);
+    return { roots: [], runners, errors: [] };
+  }
+);
+
+export function scanManagedRunners(): Promise<ScanResult> {
+  return scanManagedDirs(managedRunnerDirs());
+}
 
 // 已纳管 runner 的运行计数，供 info/overview 上报「实例状态」。
 //

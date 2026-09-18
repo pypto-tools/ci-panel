@@ -53,7 +53,14 @@ export function singleFlightBy<A extends unknown[], T>(
 
     const task = load(...args)
       .then((value) => {
-        if (ttlMs > 0) done.set(key, { at: now(), value });
+        if (ttlMs > 0) {
+          const at = now();
+          // 写入时顺手清掉所有已过期的条目：只在「同一个 key 再来时」才删的话，一个再也不会
+          // 被问到的 key 会一直留在闭包里。O(n) 但 n 就是 key 的个数，而写入只发生在一次
+          // 昂贵的 load 完成之后 —— 相比 load 本身可以忽略。
+          for (const [k, entry] of done) if (at - entry.at >= ttlMs) done.delete(k);
+          done.set(key, { at, value });
+        }
         return value;
       })
       .finally(() => {

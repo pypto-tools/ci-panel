@@ -10,7 +10,7 @@ import logger from "../log";
 import { dirKey, withRunnerLock } from "../runner_lock";
 import { metaFilePath, readMarker, type RunnerMarker } from "../runner_marker";
 import { errText } from "../runner_provision";
-import { scanListenerProcs, type ListenerProc } from "./local_procs";
+import { scanListenerProcs, sharedListenerProcs, type ListenerProc } from "./local_procs";
 import { ownershipOf } from "./ownership";
 import { availableBackends, backendFor, isSupervisorKind, nodeDefaultSupervisor } from "./registry";
 import type { Observation, ObservedInstance } from "./types";
@@ -65,19 +65,34 @@ export interface ObserveResult {
 }
 
 /**
+ * 这一轮的 /proc 快照从哪来。
+ *
+ * - `fresh`（缺省）：现扫。**动作路径只能用这个** —— 闸门算在锁内，判定与执行之间不许有窗口，
+ *   而 start / detach 是去 GitHub 抢身份的不可逆副作用。
+ * - `shared`：复用 1 秒内的共享快照。只读路径（列表、计数、详情页）用它，把叠在同一拍上的
+ *   几路轮询合成一次全量扫描，见 local_procs 的 sharedListenerProcs。
+ *
+ * 缺省值是 fresh 而不是 shared：新加的调用方忘了选，得到的是**更保守**的那个。
+ */
+export type ProcSource = "fresh" | "shared";
+
+/**
  * 对**所有可用后端**求并集，而不是只问声明的那一个——这是冲突检测能成立的唯一方式。
  * dirs 会先归一化，返回的 map 以归一化后的路径为 key。
  */
-export async function observeAll(dirs: string[]): Promise<ObserveResult> {
+export async function observeAll(
+  dirs: string[],
+  procSource: ProcSource = "fresh"
+): Promise<ObserveResult> {
   const keys = dirs.map(canonicalPath);
   const merged = new Map<string, Map<string, ObservedInstance>>();
   const details = new Map<string, string>();
   let complete = true;
 
   // /proc 一轮只扫一次，快照传给每个后端。扫不动本身也是一次观测失败
-  let procs: ListenerProc[] = [];
+  let procs: readonly ListenerProc[] = [];
   try {
-    procs = await scanListenerProcs();
+    procs = procSource === "shared" ? await sharedListenerProcs() : await scanListenerProcs();
   } catch (err: unknown) {
     complete = false;
     logger.error(`[supervisor] /proc 扫描失败，本轮观测不完整: ${errText(err)}`);

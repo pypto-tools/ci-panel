@@ -98,7 +98,11 @@ httpServer.listen(config.port, config.ip);
 const io = new Server(httpServer, {
   serveClient: false,
   pingInterval: 1000 * 20,
-  pingTimeout: 1000 * 10,
+  // 节点机器的本职就是跑 CI，CPU 打满是常态。一旦 daemon 的事件循环被饿住，pong 就会迟到，
+  // 而这里的 10 秒窗口太窄：机器好好的、runner 也在跑，面板却因为一次迟到的心跳把整个节点
+  // 判成「远程节点不可用」，随后对它的每个请求在发出前就被拒掉。
+  // 放宽到 30 秒：代价是真正宕掉的节点判定慢一点（约 20+30 秒），换来的是高负载节点不再假死。
+  pingTimeout: 1000 * 30,
   cookie: false,
   path: removeTrail(config.prefix, "/") + "/socket.io",
   cors: {

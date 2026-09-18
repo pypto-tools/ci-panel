@@ -11,6 +11,7 @@
 //   reconcile      → 推进停止阶梯；或在 desired 仍是 "running" 且没有活体时按退避重拉
 import { spawn as nodeSpawn, type SpawnOptions } from "child_process";
 import fs from "fs-extra";
+import os from "os";
 
 import { $t } from "../../../i18n";
 import { canonicalPath } from "../../../tools/path_link_check";
@@ -172,6 +173,46 @@ export interface ProcessDeps {
   // 面板点一次按钮的等待窗口。restart 内部那次 stop 用的也是它，所以它必须可注入 ——
   // 否则那条路只能用真实的 8 秒去测。
   settleTimeoutMs: number;
+  // 把刚拉起的 run.sh 调回普通优先级。可注入，用例才能断言「每次 spawn 之后都调了它」——
+  // 真实效果（-10 → 0）需要 daemon 本身带着提升过的优先级，非特权的测试进程造不出来。
+  resetPriority: (pid: number) => void;
+}
+
+/**
+ * 让刚拉起的 runner 回到普通优先级。
+ *
+ * daemon 的 systemd 单元给了自己 Nice=-10 与 OOMScoreAdjust=-800 —— 它是控制面，机器打满时
+ * 必须排得上队、内存紧张时不能先被杀。但这两个值都**会被子进程继承**，而 process 托管下
+ * run.sh 正是 daemon 的子进程：不调回来的话，每一个 Runner.Listener 和它跑的每一个 CI job 都会
+ * 带着控制面的优先级和 OOM 豁免——吃 CPU 最多、吃内存最多的恰恰是它们，结果与初衷完全相反。
+ *
+ * 为什么非特权也能做到：把 nice 调大（降低优先级）、把 oom_score_adj 调高（更容易被杀）都是
+ * 进程属主被允许的方向，只有反方向才需要 CAP_SYS_NICE / CAP_SYS_RESOURCE。
+ *
+ * 已知的两个缺口（写在这里，免得有人以为这已经是完美隔离）：
+ *   1. 窗口期：spawn 返回之后才调得回来，这之前 run.sh 若已 fork 出子进程，那个子进程带着旧值。
+ *      run.sh 在 exec 之后要先跑一段脚本才起 listener，实践中窗口到不了那一步。
+ *   2. cgroup 调不回来：process 托管的 runner 与 daemon 同在一个 cgroup（单元里 KillMode=process
+ *      的说明讲了为什么），共享 CPUWeight=1000 那份额度。要彻底隔离得让 runner 进自己的 scope
+ *      （systemd-run --scope），那是另一件事。
+ *
+ * 尽力而为，绝不抛：run.sh 此刻已经在跑了，为了一个优先级把这次启动判成失败是本末倒置。
+ */
+export function resetChildPriority(pid: number): void {
+  try {
+    os.setPriority(pid, 0);
+  } catch (err: unknown) {
+    logger.warn(`[supervisor-process] 调回 runner 优先级失败 pid=${pid}: ${errText(err)}`);
+  }
+  // oom_score_adj 只有 Linux 有；别的平台上 daemon 也不会带着 OOMScoreAdjust 启动。
+  if (process.platform !== "linux") return;
+  try {
+    fs.writeFileSync(`/proc/${pid}/oom_score_adj`, "0");
+  } catch (err: unknown) {
+    logger.warn(
+      `[supervisor-process] 调回 runner 的 oom_score_adj 失败 pid=${pid}: ${errText(err)}`
+    );
+  }
 }
 
 const DEFAULT_DEPS: ProcessDeps = {
@@ -180,7 +221,8 @@ const DEFAULT_DEPS: ProcessDeps = {
   now: () => Date.now(),
   spawn: nodeSpawn,
   settlePollMs: SETTLE_POLL_MS,
-  settleTimeoutMs: SETTLE_TIMEOUT_MS
+  settleTimeoutMs: SETTLE_TIMEOUT_MS,
+  resetPriority: resetChildPriority
 };
 
 export interface ProcessSupervisor extends RunnerSupervisor {
@@ -323,6 +365,22 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
         // 记账自己失败不能盖掉原始错误：调用方要看到的是 spawn 为什么没起来。
         await recordFailure(markerId, err, true).catch(() => undefined);
         throw err;
+      }
+
+      // 越早越好：窗口期里 run.sh fork 出的子进程会带着 daemon 的优先级（见 resetChildPriority）。
+      // 没有 pid 就是没起来，下面有专门的失败处理。
+      //
+      // **必须在上面那个 try 之外**，而且自己兜住异常：那个 catch 会把任何异常记成一次启动失败
+      // 并重抛。但走到这里 run.sh 已经在跑了——为一个优先级把它判成失败，会进退避、稍后再 spawn
+      // 一个，与这个活着的 listener 抢同一个 GitHub 身份。
+      if (typeof child.pid === "number") {
+        try {
+          deps.resetPriority(child.pid);
+        } catch (err: unknown) {
+          logger.warn(
+            `[supervisor-process] 调回 runner 优先级失败 pid=${child.pid}: ${errText(err)}`
+          );
+        }
       }
 
       // spawn 失败在 Node 里**不抛**：命令不存在时它照样返回一个 ChildProcess，child.pid 是

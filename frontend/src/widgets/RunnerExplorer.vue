@@ -192,12 +192,35 @@ watch([daemonId, repoSlug], () => {
   runnerPagination.value = { ...runnerPagination.value, current: 1 };
 });
 
+// allSettled 而不是 all：两路数据互相独立（节点列表是面板内存里的，runner 列表要去每个节点扫
+// 磁盘），Promise.all 会让慢的那一路把快的那一路的结果一起否掉，报出一句笼统的"加载失败"。
+// 失败时界面并不会空掉：useAsyncState 配的是 resetOnExecute:false，state 保留上一次的值，
+// 所以继续显示旧数据、只是不再更新——这正是轮询场景下该有的行为，所以别去清它。
 async function load(silent = false) {
-  try {
-    await Promise.all([fetchNodes(), fetchRepos()]);
-  } catch (err: any) {
-    if (!silent) message.error("加载失败：" + (err?.message || err));
-  }
+  const [nodesResult, reposResult] = await Promise.allSettled([fetchNodes(), fetchRepos()]);
+
+  if (silent) return;
+
+  // 每一路各报一条，说清楚是哪一路失败了：runner 列表超时多半是某个节点扫描慢，而节点本身
+  // 是好的。「显示的是上一次的数据」只在**失败的那一路**真有旧数据时才说 —— 首次加载时节点列表
+  // 成功、runner 列表失败，界面上并没有任何旧的 runner 数据，别承诺一个不存在的东西。
+  const report = (what: string, reason: unknown, hasStale: boolean) =>
+    message.error(
+      t(
+        hasStale
+          ? "TXT_CODE_RUNNER_EXPLORER_LOAD_FAILED_STALE"
+          : "TXT_CODE_RUNNER_EXPLORER_LOAD_FAILED",
+        { what, reason: errText(reason) }
+      )
+    );
+  if (nodesResult.status === "rejected")
+    report(t("TXT_CODE_RUNNER_EXPLORER_NODES"), nodesResult.reason, Boolean(nodes.value));
+  if (reposResult.status === "rejected")
+    report(t("TXT_CODE_RUNNER_EXPLORER_RUNNERS"), reposResult.reason, Boolean(repoData.value));
+}
+
+function errText(err: unknown): string {
+  return (err as Error)?.message || String(err);
 }
 
 // job 会来会走，10 秒自动刷一次

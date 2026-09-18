@@ -45,6 +45,8 @@ export interface FakeDeps extends ProcessDeps {
   signals: Array<{ pid: number; signal: NodeJS.Signals }>;
   // spawn 的调用记录（命令、参数、cwd、env）
   spawns: SpawnCall[];
+  // 被调回普通优先级的 pid，按顺序
+  priorityResets: number[];
   advance(ms: number): void;
 }
 
@@ -65,6 +67,7 @@ export function fakeDeps(over: Partial<ProcessDeps> = {}): FakeDeps {
     procs: [],
     signals: [],
     spawns: [],
+    priorityResets: [],
     advance: (ms: number) => {
       clock += ms;
     },
@@ -78,6 +81,9 @@ export function fakeDeps(over: Partial<ProcessDeps> = {}): FakeDeps {
     spawn: (cmd, args, opts) => {
       deps.spawns.push({ cmd, args, opts });
       return fakeChild(4242);
+    },
+    resetPriority: (pid) => {
+      deps.priorityResets.push(pid);
     },
     ...over
   };

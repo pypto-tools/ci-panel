@@ -8,10 +8,54 @@ Wants=network-online.target
 Type=simple
 User=__USER__
 WorkingDirectory=__ROOT__/current/daemon
+# Node 的文件 I/O 线程池，默认只有 4 个线程。观测一轮要读遍 /proc 下的每个 pid，
+# pid 多的机器（跑着大量容器/pod 的节点）上这 4 个线程就是瓶颈。这些线程绝大部分时间
+# 阻塞在 I/O 上、并不跟负载抢 CPU，所以调大是近乎纯收益。
+# **必须排在 EnvironmentFile 之前**：systemd 里后出现的赋值覆盖先出现的，放在后面就等于
+# 运维再也无法用 .env 覆盖这个值。
+Environment=UV_THREADPOOL_SIZE=32
 EnvironmentFile=-__ROOT__/.env
 ExecStart=__NODE__ --enable-source-maps --max-old-space-size=8192 app.js
 Restart=always
 RestartSec=3
+
+# ---- 在打满的机器上活下来 ----
+# 节点机器的本职就是跑 CI：runner 把 CPU 吃到 100% 是常态，不是异常。但 daemon 是控制面，
+# 它一慢，事件循环就赶不上 socket.io 的心跳，面板那边直接显示「远程节点不可用」——机器明明
+# 好好的，只是控制面没排上队。下面几行不减少 daemon 的工作量，只保证它抢得到时间片。
+#
+# daemon 稳态用不到一个核（常驻 CPU 主要花在周期性状态观测上），所以给它相对优势几乎不从
+# 负载那里拿走什么，而收益是「节点还认不认得出来」。
+#
+# **这几个值会被子进程继承。** systemd 托管的 runner 跑在自己的单元里，不受影响；但 process
+# 托管下 run.sh 是 daemon 的子进程，所以后端在 spawn 之后会立刻把它调回 nice 0 /
+# oom_score_adj 0（见 supervisor/process 的 resetChildPriority）。调不回来的是 cgroup：
+# process 托管的 runner 与 daemon 同在本单元的 cgroup 里，共享下面的 CPUWeight。
+#
+# Nice 是负数=优先级更高（-20 最高、19 最低）。系统单元由 PID 1 以 root 施加，不需要
+# daemon 自己有 CAP_SYS_NICE。CFS 的权重表：nice 0 = 1024，-10 ≈ 9548，也就是同等条件下
+# 能拿到约 9 倍于普通任务的时间片 —— 对一个稳态用不到一个核的控制面，这已经接近「随叫随到」。
+# 没有用 -19（约 87 倍）：那个量级的收益全是边际的，而把一个带 32 个线程池线程的 Node 进程
+# 顶到接近实时的优先级，出问题时的排查成本远大于它省下的那几毫秒。
+Nice=-10
+# cgroup 里的 CPU 份额权重，默认 100。runner 单元与其它负载保持默认即可，这里只要相对优势。
+# cgroup v1 上 systemd 会自动映射成 CPUShares；systemd 太老不认这个键时只会告警，不影响启动。
+CPUWeight=1000
+# 内存压力下别让 OOM killer 先挑控制面下手。节点机器上 runner 的 job 才是吃内存的大户，
+# 而 daemon 被杀掉的后果是整个节点从面板上消失。
+OOMScoreAdjust=-800
+# 磁盘 I/O 权重。**注意它常常是空操作**：cgroup v1 上映射成 BlockIOWeight，需要 CFQ/BFQ
+# 调度器；而现在多数机器用 blk-mq，调度器是 none 或 mq-deadline，那时权重无人理会。
+# 留着是因为在用 bfq 的机器上确有效果，且无副作用 —— 但不要指望它。
+IOWeight=500
+
+# 这里**刻意不写 AllowedCPUs**（让 daemon 独占若干核）。两个原因：
+#   1. 它要求 cgroup v2 统一层级。本项目实测的机器是纯 cgroup v1，那种环境下 systemd 会
+#      静默忽略这个键 —— 一个看着已经生效、实际什么都没做的配置，比没有更糟。
+#   2. 核数因机器而异：320 核的机器上留 2 个核不算什么，同一份模板落到 4 核的小节点上
+#      就是把控制面锁死在半台机器里。
+# 真要做 CPU 预留，见 DEPLOY.md「给节点控制面预留 CPU」——那是**按机器**加 drop-in 的事，
+# 而且必须同时把那些核从负载侧排除掉，只配一半会帮倒忙。
 
 # 这里刻意不加 ProtectSystem / PrivateTmp / NoNewPrivileges 之类的沙箱选项:
 # daemon 必须能跑 `sudo -n ci-panel-runner-svc` 去装卸 runner 的 systemd 单元和写

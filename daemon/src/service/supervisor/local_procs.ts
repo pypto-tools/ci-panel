@@ -11,6 +11,7 @@
 import fs from "fs-extra";
 
 import { canonicalPath } from "../../tools/path_link_check";
+import { singleFlightBy } from "../../utils/single_flight";
 import logger from "../log";
 
 export interface ListenerProc {
@@ -113,3 +114,22 @@ export async function scanListenerProcs(procRoot = "/proc"): Promise<ListenerPro
 
   return Array.from(listeners, ([pid, v]) => ({ pid, ...v, busy: workerParents.has(pid) }));
 }
+
+// 一轮观测用的共享快照。**只给只读路径用**（列表、计数、详情页），动作路径必须直接调
+// scanListenerProcs()：那里要的是「此时此刻」的事实，见本文件开头的说明。
+//
+// 为什么需要它：runner/managed_list、info/overview 的计数、详情页的 runner/state 是三条独立的
+// 调用链，各自都要「本机有哪些 listener 活着」，此前各扫各的 /proc。前端三个轮询叠起来时，
+// 一分钟内能打出几十次全量扫描，而每次扫描要读遍机器上的每一个 pid。
+//
+// TTL 取 1 秒：观测本来就是快照语义（observeAll 已经声明「一轮只扫一次」，一轮之内的结果对
+// 同一轮里的所有后端都是同一份），而最密的只读轮询是详情页的 5 秒一轮 —— 1 秒的复用窗口够把
+// 同一拍里的并发合掉，又不会让界面上的「运行中 / 正在跑 job」看起来是卡住的。
+const SNAPSHOT_TTL_MS = 1000;
+
+// 显式给出形参与结果类型：两个形参都带缺省值时 TS 推不出 T，会把结果推成 unknown。
+export const sharedListenerProcs = singleFlightBy<[procRoot?: string], ListenerProc[]>(
+  (procRoot = "/proc") => procRoot,
+  (procRoot = "/proc") => scanListenerProcs(procRoot),
+  { ttlMs: SNAPSHOT_TTL_MS }
+);

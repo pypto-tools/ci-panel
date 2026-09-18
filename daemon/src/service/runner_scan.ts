@@ -35,6 +35,7 @@ import {
 import { dirKey, withRunnerLock } from "./runner_lock";
 import { $t } from "../i18n";
 import { canonicalPath } from "../tools/path_link_check";
+import { singleFlight, singleFlightBy } from "../utils/single_flight";
 import { legacyManagedBy, legacySystemdState } from "./supervisor/legacy";
 import { scanListenerProcs } from "./supervisor/local_procs";
 import { toRuntimeState } from "./supervisor/ownership";
@@ -306,7 +307,10 @@ async function buildRunners(dirsRaw: string[]): Promise<ScannedRunner[]> {
 
   // 「谁在托管它、有没有在跑」全部退到托管后端里：这里对所有可用后端求一次并集，
   // 本函数不再认识 systemctl 与 /proc。observeAll 内部一轮只扫一次 /proc。
-  const { byDir, complete } = await observeAll(dirs);
+  //
+  // "shared"：buildRunners 的四个调用方（列表、计数、详情页、全盘扫描）全是只读展示路径，
+  // 复用 1 秒内的 /proc 快照。动作路径不经过这里，它在锁内自己调 observeAll（缺省 fresh）。
+  const { byDir, complete } = await observeAll(dirs, "shared");
 
   const runners: ScannedRunner[] = drafts.map((d) => {
     // 意图（该由谁管）与观测（现在被谁管着）是两个正交的轴，都由框架给出，这里只是组装
@@ -386,11 +390,33 @@ export function managedRunnerDirs(): string[] {
 }
 
 // 列出已纳管的 runner，供日常展示用。
-export async function scanManagedRunners(): Promise<ScanResult> {
-  const runners = await buildRunners(managedRunnerDirs());
-  runners.forEach(reconcileHandle); // 幂等：顺手修早期句柄实例遗留的启动命令
-  logger.info(`[runner-scan] 已纳管（经句柄实例发现）：${runners.length} 个`);
-  return { roots: [], runners, errors: [] };
+//
+// singleFlight：这是面板 runner 列表页 10 秒一轮的轮询入口，此前**没有任何缓存与去重**，
+// 每次调用都走一遍全量 /proc 扫描。实测 6400 个 pid 的节点上单次 659 ms，而 6 个并发时每个
+// 都要等 3.4 秒 —— 6 轮独立扫描在 4 线程的 libuv 线程池里排队，浏览器那边就成了
+// 「加载失败：timeout of 30000ms exceeded」。合并之后这 6 个调用共享同一轮。
+//
+// 刻意不给 ttlMs：只合并**并发**调用，不缓存已完成的结果。纳管 / 取消纳管之后前端会立刻重拉
+// 列表，缓存一份哪怕只有几秒的旧结果，都会让刚导入的 runner 在界面上"没出现"。
+//
+// **按目录集合合并，不是无条件合并。** 光去掉 TTL 还不够：一轮扫描进行中时完成了一次纳管，
+// 紧接着到来的请求若加入那一轮，拿到的就是纳管之前的目录集合 —— 窗口更小，但正是上面那个
+// 「刚导入的 runner 没出现」。纳管与取消纳管都会改变 managedRunnerDirs() 的结果（写/删 .cipanel、
+// 建句柄实例），所以把它当 key：集合变了就是新的一轮，没变才共享。managedRunnerDirs() 本身
+// 只是遍历句柄实例 + 逐个 existsSync，比它省下的那一轮 /proc 扫描便宜几个数量级。
+const scanManagedDirs = singleFlightBy(
+  // 排序只用于 key：同一个集合不该因为实例表的遍历顺序不同而被当成两轮
+  (dirs: string[]) => [...dirs].sort().join("\0"),
+  async (dirs: string[]): Promise<ScanResult> => {
+    const runners = await buildRunners(dirs);
+    runners.forEach(reconcileHandle); // 幂等：顺手修早期句柄实例遗留的启动命令
+    logger.info(`[runner-scan] 已纳管（经句柄实例发现）：${runners.length} 个`);
+    return { roots: [], runners, errors: [] };
+  }
+);
+
+export function scanManagedRunners(): Promise<ScanResult> {
+  return scanManagedDirs(managedRunnerDirs());
 }
 
 // 已纳管 runner 的运行计数，供 info/overview 上报「实例状态」。
@@ -408,22 +434,23 @@ export interface ManagedRunnerCounts {
 }
 
 const COUNTS_TTL_MS = 5000;
-let countsCache: { at: number; value: ManagedRunnerCounts } | null = null;
 
-export async function getManagedRunnerCounts(): Promise<ManagedRunnerCounts> {
-  const now = Date.now();
-  if (countsCache && now - countsCache.at < COUNTS_TTL_MS) return countsCache.value;
-
-  const runners = await buildRunners(managedRunnerDirs());
-  const value: ManagedRunnerCounts = { total: 0, running: 0, busy: 0 };
-  for (const r of runners) {
-    value.total++;
-    if (r.runtime?.running) value.running++;
-    if (r.runtime?.busy) value.busy++;
-  }
-  countsCache = { at: now, value };
-  return value;
-}
+// TTL 之外再加并发合并：原先的手写缓存只在**扫描结束后**才写，所以一次慢扫描（负载高时
+// systemctl 能顶到超时）期间到达的每个 info/overview 都会各开一轮全量扫描 —— 越慢并发越多、
+// 并发越多越慢，典型的 cache stampede。singleFlight 让它们等同一轮。
+export const getManagedRunnerCounts = singleFlight(
+  async (): Promise<ManagedRunnerCounts> => {
+    const runners = await buildRunners(managedRunnerDirs());
+    const value: ManagedRunnerCounts = { total: 0, running: 0, busy: 0 };
+    for (const r of runners) {
+      value.total++;
+      if (r.runtime?.running) value.running++;
+      if (r.runtime?.busy) value.busy++;
+    }
+    return value;
+  },
+  { ttlMs: COUNTS_TTL_MS }
+);
 
 // 探单个 runner 目录的实时状态（详情页拿基本信息 + 定时刷新用）。免全盘遍历。
 export async function scanOneRunner(dirRaw: string): Promise<ScannedRunner | null> {

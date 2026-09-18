@@ -18,12 +18,24 @@ import {
 } from "../entity/repo";
 import { logger } from "./log";
 import RemoteRequest from "./remote_command";
+
 import RemoteServiceSubsystem from "./remote_service";
 import { $t } from "../i18n";
 import type { RepoRunnerRef, ScannedRunner } from "mcsmanager-common";
 import { errMessage } from "../utils/error";
 
 const CATEGORY = "RepoConfig";
+
+/**
+ * 向单个节点要 runner 列表的超时。
+ *
+ * **必须明显小于浏览器的请求超时**（前端 axios 缺省 30 秒，见 frontend/src/services/apiService.ts）。
+ * 这个值原本正是 30000，与前端撞在同一刻：面板要等到 30.0 秒才把慢节点判进 failedNodes 再拼
+ * 响应，而浏览器在 30.0 秒整点就已经 abort 了。于是 collectRunners 精心写好的部分失败降级
+ * （failedNodes + 前端的"数据不完整"横幅）**一次都跑不到**，用户看到的永远是整页加载失败 ——
+ * 连那些扫得飞快的健康节点也一起空掉，因为整个界面都由这一个响应推导出来。
+ */
+const MANAGED_LIST_TIMEOUT_MS = 8000;
 
 // 三方共用的声明只在 common 里写一份；这里转出去，免得已有的 import 全要改路径。
 // 之前 panel 与 frontend 各手写一份 RepoRunner*，而前端那份不引 common，改字段时编译器
@@ -186,7 +198,11 @@ class RepoService {
         const nodeName = node.config.remarks || `${node.config.ip}:${node.config.port}`;
         try {
           // 不传 roots，用 daemon 侧的默认扫描根（CIP_SCAN_ROOTS）
-          const result = await new RemoteRequest(node).request("runner/managed_list", {}, 30000);
+          const result = await new RemoteRequest(node).request(
+            "runner/managed_list",
+            {},
+            MANAGED_LIST_TIMEOUT_MS
+          );
           for (const scanned of result?.runners || []) {
             const ref = toRunnerRef(node.uuid, nodeName, scanned);
             const slug = String(scanned.repo || "");

@@ -76,7 +76,25 @@ export class RemoteServiceConfig {
     reconnectionDelayMax: 1000 * 5,
     timeout: 1000 * 10,
     reconnection: true,
-    reconnectionAttempts: 10,
+    // 实际等于不设上限。原值 10：重连十次还不成，socket.io 就**彻底放弃**，此后这条连接
+    // 再也不会自己回来，只能等 RemoteServiceSubsystem 的巡检把它整个重建。高负载节点上连接
+    // 抖动本来就多，十次很容易在一次故障窗口里用光，结果是机器早就恢复了、面板还显示不可用。
+    // 退避上限是 reconnectionDelayMax（5 秒），所以无限重试的代价只是每 5 秒一次握手。
+    //
+    // 用 MAX_SAFE_INTEGER 而不是 Infinity：这个对象会被 JSON 序列化落盘，而 Infinity 会变成
+    // null。虽然 initialize() 现在一律丢掉盘上那份、以代码为准，但别在磁盘上留一个看不懂的
+    // null 当陷阱。
+    reconnectionAttempts: Number.MAX_SAFE_INTEGER,
+    // 直接用 WebSocket，不走「先 HTTP 长轮询再升级」的默认路径。
+    //
+    // 默认的 ["polling", "websocket"] 对本项目是纯亏：面板与节点之间是一条长期连接，而长轮询
+    // 把它拆成一串各自带超时的 HTTP 请求，每一轮都要重新过一遍 Koa 中间件——节点一忙，掉的
+    // 就是这些请求，表现成连接反复重建。升级过程本身也是一次额外的探测握手。
+    //
+    // 代价：中间若有不支持 WebSocket 的反向代理（daemon 的 prefix 就是为这类部署准备的），
+    // 连接会直接失败而不是退回长轮询。但 socket.io 本来就会升级到 WebSocket，那种代理在升级
+    // 这一步同样会出问题，只是失败得更晚、更难查。
+    transports: ["websocket"],
     rejectUnauthorized: false
   };
 

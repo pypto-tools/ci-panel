@@ -754,6 +754,7 @@
   "TXT_CODE_b7cab91d": "Send Command",
   "TXT_CODE_b7d026f8": "Scheduled Tasks",
   "TXT_CODE_b7d38e78": "The remote node is unavailable! \nPlease contact the administrator to go to the node list to check the status of the remote node!",
+  "TXT_CODE_NODE_AUTH_REJECTED": "The node rejected the panel's API key. Edit this node in the node list and re-enter its key, or check the node's panel-IP allowlist.",
   "TXT_CODE_b82225c3": "Decompressing, please wait patiently...",
   "TXT_CODE_b858d78a": "Copied",
   "TXT_CODE_b862a158": "CPU Usage",
@@ -1413,5 +1414,9 @@
   "TXT_CODE_RUNNER_ENV_TIP_LISTENER": "Written to the systemd unit's Environment=, so it reaches the listener process. Variables the runner needs in order to reach GitHub, a proxy above all, must go here — the proxy entered above is written automatically on create, so fill this in only to override it. Written on create, and the unit is restarted to apply it.",
   "TXT_CODE_RUNNER_ENV_TIP_DOTENV": "Written to .env in the runner directory and injected into the job/step environment only, never the listener process. Device numbers, library paths and the like go here. Written on create along with the registration, and effective from the first job.",
   "TXT_CODE_RUNNER_ENV_TIP_DEFAULT_LOADING": "Reading the variables that will be written automatically…",
-  "TXT_CODE_RUNNER_ENV_TIP_PLACEHOLDERS": "Placeholders in a value expand per runner: <code>{name}</code> the full name, <code>{index}</code> the number in the name, <code>{seq}</code> its position in this batch (from 1); <code>+ - * / %</code> and parentheses are supported."
+  "TXT_CODE_RUNNER_ENV_TIP_PLACEHOLDERS": "Placeholders in a value expand per runner: <code>{name}</code> the full name, <code>{index}</code> the number in the name, <code>{seq}</code> its position in this batch (from 1); <code>+ - * / %</code> and parentheses are supported.",
+  "TXT_CODE_RUNNER_EXPLORER_NODES": "node list",
+  "TXT_CODE_RUNNER_EXPLORER_RUNNERS": "runner list",
+  "TXT_CODE_RUNNER_EXPLORER_LOAD_FAILED": "Failed to load the {what}: {reason}",
+  "TXT_CODE_RUNNER_EXPLORER_LOAD_FAILED_STALE": "Failed to load the {what}: {reason}. Showing the last data received."
 }

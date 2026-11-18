@@ -6,6 +6,7 @@
 // 之前设好 —— runner_scan.ts 与 runner_provision.ts 都在模块作用域就把它们读走(前者定扫描根,
 // 后者定助手路径),晚一步就来不及了。setupFiles 整体先于 spec 的 import 求值,所以放在本文件里
 // 就够;但值若派生自 sandbox,就必须晚于下面那行 mkdtempSync。
+import { vi } from "vitest";
 import fs from "fs-extra";
 import os from "os";
 import path from "path";
@@ -56,4 +57,41 @@ process.on("exit", () => {
     // 何况进程已在退出中,异步 appender 未必还能落盘。
     console.error(`[daemon-test] 沙箱清理失败,请手动删除 ${sandbox}:`, err);
   }
+});
+
+// Exercise the real worker source without requiring a production build before unit tests.
+// Only the entry path/TS loader changes; filesystem reads still execute in a real thread.
+vi.mock("node:worker_threads", async () => {
+  const actual = await vi.importActual<typeof import("node:worker_threads")>("node:worker_threads");
+  const { afterAll } = await import("vitest");
+  const nodePath = await import("node:path");
+  const workers = new Set<InstanceType<typeof actual.Worker>>();
+  afterAll(async () => {
+    await Promise.all(Array.from(workers, (worker) => worker.terminate()));
+    workers.clear();
+  });
+  return {
+    ...actual,
+    Worker: class extends actual.Worker {
+      constructor(filename: string | URL, options?: import("node:worker_threads").WorkerOptions) {
+        const daemonRoot = process.env.CIP_TEST_DAEMON_ROOT!;
+        const isScanner =
+          typeof filename === "string" && nodePath.basename(filename) === "proc_scan_worker.js";
+        super(
+          isScanner
+            ? nodePath.join(daemonRoot, "src/service/supervisor/proc_scan_worker.ts")
+            : filename,
+          isScanner
+            ? {
+                ...options,
+                execArgv: ["-r", require.resolve("ts-node/register/transpile-only")],
+                env: { ...process.env, TS_NODE_PROJECT: nodePath.join(daemonRoot, "tsconfig.json") }
+              }
+            : options
+        );
+        workers.add(this);
+        this.once("exit", () => workers.delete(this));
+      }
+    }
+  };
 });

@@ -1,4 +1,5 @@
 {
+  "TXT_CODE_RUNNER_PROC_SCAN_FAILED": "La inspección de procesos falló o agotó el tiempo de espera. Inténtalo de nuevo más tarde.",
   "TXT_CODE_00000001": "Bienvenido al panel de gestión de CI Panel",
   "TXT_CODE_10088738": "Confirmar eliminación",
   "TXT_CODE_10150756": "Tareas desencadenadas por eventos",

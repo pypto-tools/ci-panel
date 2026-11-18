@@ -1,4 +1,5 @@
 {
+  "TXT_CODE_RUNNER_PROC_SCAN_FAILED": "Process inspection failed or timed out. Try again later.",
   "TXT_CODE_00000001": "Welcome to the CI Panel Control Panel",
   "TXT_CODE_10088738": "Confirm deletion",
   "TXT_CODE_10150756": "Event-Triggered Task",

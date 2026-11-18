@@ -402,3 +402,21 @@ alone is not proof of process ownership and never triggers automatic reassignmen
 
 `ci-panel-ctl` 的完整命令见 `ci-panel-ctl --help`。特权助手的授权边界、为什么启停也要走
 助手，见 [prod-scripts/README.md](prod-scripts/README.md)。
+
+## 容器中的进程回收与扫描
+
+无 systemd 的容器应使用会回收孤儿进程的 PID 1，例如安装 tini 后以
+`tini -- sleep infinity` 启动容器。Docker 也可使用 `--init`。
+直接以 `sleep infinity` 作为 PID 1 会让退出的孤儿进程长期堆积；daemon 重启不能清掉它们。
+已有大量僵尸时，先停止接收新任务并等待当前任务结束，再重建带 init 的容器。
+在已运行的容器里另起 tini 不能接管原 PID 1 的僵尸。
+
+Daemon 使用单个专用 worker 同步扫描 `/proc`，避免逐 PID 的异步读取占用通信、日志等
+功能共用的 libuv 线程池。扫描仍与节点 PID 数量成正比，不能替代容器的进程回收。
+列表等只读请求保留 1 秒快照缓存；启停、删除和自动收敛要求请求到达后启动的新扫描。
+最多接受 32 个未完成请求，每个请求含排队时间最多等待 30 秒；超限或扫描失败会明确报错，
+不会返回空列表来表示“没有进程”。超时 worker 退出后才允许创建替代线程。
+
+`proc_scan_worker.js` 必须与 daemon 的 `app.js` 同版本、放在同一目录。
+升级应使用完整发布包，不能只替换 `app.js`。现场排障应同时记录扫描耗时、事件循环延迟
+和 WebSocket 断连原因；日志文件停止更新本身不能证明定时器停止执行。

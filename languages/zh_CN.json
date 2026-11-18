@@ -1,4 +1,5 @@
 {
+  "TXT_CODE_RUNNER_PROC_SCAN_FAILED": "进程检查失败或超时，请稍后重试。",
   "TXT_CODE_00000001": "欢迎使用 CI Panel 管理面板",
   "TXT_CODE_10088738": "确认删除",
   "TXT_CODE_10150756": "事件触发型任务",

@@ -6,7 +6,10 @@ const nodeExternals = require("webpack-node-externals");
  */
 module.exports = {
   mode: "production",
-  entry: "./src/app.ts",
+  entry: {
+    app: "./src/app.ts",
+    proc_scan_worker: "./src/service/supervisor/proc_scan_worker.ts"
+  },
   module: {
     rules: [
       {
@@ -31,7 +34,7 @@ module.exports = {
     })
   ],
   output: {
-    filename: "app.js",
+    filename: "[name].js",
     path: path.resolve(__dirname, "production")
   },
   resolve: {

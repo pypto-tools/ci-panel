@@ -138,6 +138,9 @@ mkdir -p "$CIP_SCAN_ROOTS"
 unset CIP_GITHUB_REPOS CIP_GITHUB_TOKEN CIP_RUNNER_PROXY
 
 echo "[3/7] 启动 daemon 与 web …"
+# Verify the separately bundled scanner before starting either service.
+node "$SELF_DIR/check-proc-worker.cjs" "$APP/daemon"
+
 (cd "$APP/daemon" && exec node --enable-source-maps app.js) >"$WORK/daemon.log" 2>&1 &
 DAEMON_PID=$!
 (cd "$APP/web" && exec node --enable-source-maps app.js) >"$WORK/web.log" 2>&1 &

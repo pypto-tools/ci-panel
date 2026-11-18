@@ -32,6 +32,8 @@ mkdir production-code/web/public
 
 mv "${BASE_PATH}/daemon/production/app.js" "${BASE_PATH}/production-code/daemon"
 mv "${BASE_PATH}/daemon/production/app.js.map" "${BASE_PATH}/production-code/daemon"
+mv "${BASE_PATH}/daemon/production/proc_scan_worker.js" "${BASE_PATH}/production-code/daemon"
+mv "${BASE_PATH}/daemon/production/proc_scan_worker.js.map" "${BASE_PATH}/production-code/daemon"
 cp -f "${BASE_PATH}/daemon/package.json" "${BASE_PATH}/production-code/daemon/package.json"
 cp -f "${BASE_PATH}/daemon/package-lock.json" "${BASE_PATH}/production-code/daemon/package-lock.json"
 

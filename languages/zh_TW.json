@@ -1,4 +1,5 @@
 {
+  "TXT_CODE_RUNNER_PROC_SCAN_FAILED": "程序檢查失敗或逾時，請稍後重試。",
   "TXT_CODE_00000001": "歡迎使用 CI Panel 管理面板",
   "TXT_CODE_10088738": "確認刪除",
   "TXT_CODE_10150756": "事件觸發型任務",

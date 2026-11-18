@@ -89,24 +89,25 @@ BACKUP_DIR=""
 
 backup_local_production() {
   BACKUP_DIR="$(mktemp -d)"
-  local pkg
+  local pkg artifact
   for pkg in daemon panel; do
     if [ -f "$ROOT/$pkg/production/app.js" ]; then
       mkdir -p "$BACKUP_DIR/$pkg"
-      cp -f "$ROOT/$pkg/production/app.js" "$BACKUP_DIR/$pkg/app.js"
-      if [ -f "$ROOT/$pkg/production/app.js.map" ]; then
-        cp -f "$ROOT/$pkg/production/app.js.map" "$BACKUP_DIR/$pkg/app.js.map"
-      fi
+      for artifact in app.js app.js.map proc_scan_worker.js proc_scan_worker.js.map; do
+        if [ -f "$ROOT/$pkg/production/$artifact" ]; then
+          cp -f "$ROOT/$pkg/production/$artifact" "$BACKUP_DIR/$pkg/$artifact"
+        fi
+      done
     fi
   done
 }
 
 restore_local_production() {
-  local pkg sub dst src origin
+  local pkg sub dst src origin artifact
   for pkg in daemon panel; do
     if [ "$pkg" = panel ]; then sub=web; else sub=daemon; fi
     dst="$ROOT/$pkg/production"
-    if [ -f "$dst/app.js" ]; then continue; fi # 还在原地，不用管
+    if [ -f "$dst/app.js" ] && { [ "$pkg" != daemon ] || [ -f "$dst/proc_scan_worker.js" ]; }; then continue; fi # 还在原地，不用管
     if [ -n "$BACKUP_DIR" ] && [ -f "$BACKUP_DIR/$pkg/app.js" ]; then
       src="$BACKUP_DIR/$pkg" # 打包前在跑的那一份，原样放回
       origin="打包前的备份"
@@ -117,8 +118,9 @@ restore_local_production() {
       continue
     fi
     mkdir -p "$dst"
-    cp -f "$src/app.js" "$dst/app.js"
-    if [ -f "$src/app.js.map" ]; then cp -f "$src/app.js.map" "$dst/app.js.map"; fi
+    for artifact in app.js app.js.map proc_scan_worker.js proc_scan_worker.js.map; do
+      if [ -f "$src/$artifact" ]; then cp -f "$src/$artifact" "$dst/$artifact"; fi
+    done
     echo "[还原] $pkg/production/app.js ← $origin（本机服务保持可重启）"
   done
   if [ -n "$BACKUP_DIR" ]; then rm -rf "$BACKUP_DIR"; fi
@@ -258,7 +260,7 @@ for entry in \
   VERSION \
   web/app.js web/package.json web/public/index.html \
   web/node_modules/koa/package.json \
-  daemon/app.js daemon/package.json \
+  daemon/app.js daemon/proc_scan_worker.js daemon/package.json \
   daemon/node_modules/koa/package.json \
   prod-scripts/ci-panel-runner-svc \
   prod-scripts/install-runner-privileges.sh \

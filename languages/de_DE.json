@@ -1,4 +1,5 @@
 {
+  "TXT_CODE_RUNNER_PROC_SCAN_FAILED": "Die Prozessprüfung ist fehlgeschlagen oder hat das Zeitlimit überschritten. Bitte versuchen Sie es später erneut.",
   "TXT_CODE_00000001": "Willkommen im CI Panel-Verwaltungspanel",
   "TXT_CODE_10088738": "Bestätigen Sie den Löschvorgang",
   "TXT_CODE_10150756": "Ereignisgesteuerte Aufgaben",

@@ -1,4 +1,5 @@
 {
+  "TXT_CODE_RUNNER_PROC_SCAN_FAILED": "La vérification des processus a échoué ou a dépassé le délai imparti. Réessayez plus tard.",
   "TXT_CODE_00000001": "Bienvenue dans le panneau de gestion de CI Panel",
   "TXT_CODE_10088738": "Confirmer la suppression",
   "TXT_CODE_10150756": "tâches déclenchées par un événement",

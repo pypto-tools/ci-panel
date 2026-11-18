@@ -1,4 +1,5 @@
 {
+  "TXT_CODE_RUNNER_PROC_SCAN_FAILED": "A verificação de processos falhou ou excedeu o tempo limite. Tente novamente mais tarde.",
   "TXT_CODE_00000001": "Bem-vindo ao Painel CI Panel",
   "TXT_CODE_10088738": "Confirmar exclusão",
   "TXT_CODE_10150756": "Tarefa Acionada por Evento",

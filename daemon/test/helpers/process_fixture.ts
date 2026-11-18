@@ -72,7 +72,9 @@ export function fakeDeps(over: Partial<ProcessDeps> = {}): FakeDeps {
       clock += ms;
     },
     scan: async () => deps.procs,
-    groupExists: () => false,
+    // A listener proves its group exists; wrapper-only lifetimes need an explicit override.
+    groupState: (pgid) => (deps.procs.some((p) => p.pgid === pgid) ? "present" : "absent"),
+    readLeader: async () => undefined,
     verifyGroup: async () => true,
     kill: (pid, signal) => {
       deps.signals.push({ pid, signal });

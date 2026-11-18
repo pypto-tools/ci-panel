@@ -58,6 +58,26 @@ describe("explicit recovery of stale process ownership", () => {
     expect(deps.signals).toEqual([{ pid: -9200, signal: "SIGINT" }]);
   });
 
+  it.each([true, false])(
+    "replaces stale leader identity during reclaim (available=%s)",
+    async (available) => {
+      const oldIdentity = { bootId: "old-boot", startTicks: "100" };
+      const newIdentity = available ? { bootId: "current-boot", startTicks: "200" } : undefined;
+      await writeRuntime(fixture.markerId, { ...rt, leaderIdentity: oldIdentity });
+      const deps = fakeDeps({ readLeader: async () => newIdentity });
+      deps.procs = [listener];
+      const backend = createProcessSupervisor(deps);
+      await backend.reclaim!(fixture.dir, String(listener.pid));
+      const saved = await readRuntime(fixture.markerId);
+      expect(saved?.pgid).toBe(listener.pgid);
+      expect(saved?.leaderIdentity).toEqual(newIdentity);
+      expect(deps.signals).toEqual([]);
+      expect(deps.spawns).toEqual([]);
+      await backend.stop(fixture.dir, 0);
+      expect(deps.signals).toEqual([{ pid: -listener.pgid, signal: "SIGINT" }]);
+    }
+  );
+
   it.each(["missing", "other-directory", "stopped", "stopping", "no-pgid"])(
     "rejects a %s runtime record",
     async (mode) => {
@@ -89,7 +109,7 @@ describe("explicit recovery of stale process ownership", () => {
     "not-observed"
   ])("refuses %s without rewriting ownership", async (mode) => {
     const deps = fakeDeps({
-      groupExists: () => mode === "live-old-group",
+      groupState: () => (mode === "live-old-group" ? "present" : "absent"),
       verifyGroup: async () => mode !== "not-dedicated"
     });
     deps.procs = [listener];

@@ -28,7 +28,14 @@ import type {
   SupervisorTarget
 } from "../types";
 import { observationFor, owns } from "./observe";
-import { isDedicatedRunnerGroup, processGroupExists } from "./group";
+import {
+  inspectProcessGroup,
+  isDedicatedRunnerGroup,
+  readLeaderIdentity,
+  validPgid,
+  type GroupState,
+  type LeaderIdentity
+} from "./group";
 import {
   listenerEnvFor,
   markerIdOf,
@@ -166,7 +173,8 @@ export type SpawnFn = (
 
 export interface ProcessDeps {
   scan: () => Promise<ListenerProc[]>;
-  groupExists: (pgid: number) => boolean | Promise<boolean>;
+  groupState: (pgid: number, identity?: LeaderIdentity) => GroupState | Promise<GroupState>;
+  readLeader: (pgid: number, dir: string) => Promise<LeaderIdentity | undefined>;
   verifyGroup: (listener: ListenerProc) => Promise<boolean>;
   kill: (pid: number, signal: NodeJS.Signals) => void;
   now: () => number;
@@ -219,7 +227,8 @@ export function resetChildPriority(pid: number): void {
 
 const DEFAULT_DEPS: ProcessDeps = {
   scan: () => scanListenerProcs(),
-  groupExists: processGroupExists,
+  groupState: inspectProcessGroup,
+  readLeader: readLeaderIdentity,
   verifyGroup: isDedicatedRunnerGroup,
   kill: (pid, signal) => void process.kill(pid, signal),
   now: () => Date.now(),
@@ -233,23 +242,40 @@ export interface ProcessSupervisor extends RunnerSupervisor {
   // 只拉起、不等到位。reconcile 用它：start() 结尾要 settle 8 秒，而 tick 是串行且防重入的，
   // N 个起不来的 runner 会把有效周期拉到 8N 秒 —— 自动重拉反过来把自动停止饿死。
   spawnOnce(dir: string, t?: SupervisorTarget): Promise<void>;
+  reconcileOne(dir: string, procs: readonly ListenerProc[], t?: SupervisorTarget): Promise<void>;
 }
 
 export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): ProcessSupervisor {
   const deps: ProcessDeps = { ...DEFAULT_DEPS, ...overrides };
+  const groupStateOf = (rt: RunnerRuntime | null): Promise<GroupState> =>
+    Promise.resolve(deps.groupState(rt?.pgid ?? 0, rt?.leaderIdentity));
 
   // 每次发信号前重新证明归属。pgid 会被回收，而 SIGKILL 打错对象不可逆 —— 这道复核不能只在
   // stop 入口做一次：阶梯要跨几分钟，中间进程组可能已经退出并被别人复用。
-  const signalOwned = (
-    rt: RunnerRuntime,
-    procs: readonly ListenerProc[],
-    signal: NodeJS.Signals
-  ): void => {
-    if (!procs.some((p) => owns(rt, p))) return;
+  const signalOwned = async (rt: RunnerRuntime, signal: NodeJS.Signals): Promise<boolean> => {
+    if (!validPgid(rt.pgid)) return false;
+    const groupState = await groupStateOf(rt);
+    if (groupState === "absent" || (rt.leaderIdentity && groupState === "unknown")) return false;
+    const leader = rt.leaderIdentity ? await deps.readLeader(rt.pgid, rt.dir) : undefined;
+    if (
+      leader &&
+      rt.leaderIdentity &&
+      (leader.bootId !== rt.leaderIdentity.bootId ||
+        leader.startTicks !== rt.leaderIdentity.startTicks)
+    )
+      return false;
+    if (!leader) {
+      // Leader inspection can outlive the group; only fresh listener evidence can authorize a signal.
+      const procs = await deps.scan();
+      if (!procs.some((p) => owns(rt, p))) return false;
+    }
     try {
-      deps.kill(-rt.pgid, signal); // 负号 = 整个进程组，连 run.sh 派生的孙子一起
-    } catch {
-      /* 组已退出，ESRCH 正常 */
+      deps.kill(-rt.pgid, signal);
+      return true;
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException)?.code !== "ESRCH")
+        logger.warn(`[supervisor-process] Cannot signal process group ${rt.pgid}: ${errText(err)}`);
+      return false;
     }
   };
 
@@ -259,23 +285,21 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
     procs: readonly ListenerProc[]
   ): Promise<void> => {
     const id = markerIdOf(rt.dir);
-    if (!procs.some((p) => owns(rt, p))) {
-      // The launcher may be between listener generations. Preserve its identity until it exits.
-      if (await deps.groupExists(rt.pgid)) return;
+    if (!procs.some((p) => owns(rt, p)) && (await groupStateOf(rt)) === "absent") {
       // 进程已经没了：收工，清掉停止态但**保留 desired:"stopped"**，否则下一拍又拉起来
       await mutateRuntime(id, (cur) =>
-        cur ? { ...cur, stopRequestedAt: 0, stopStage: 0, pgid: 0 } : cur
+        cur ? { ...cur, stopRequestedAt: 0, stopStage: 0, pgid: 0, leaderIdentity: undefined } : cur
       );
       return;
     }
     const elapsed = deps.now() - rt.stopRequestedAt;
     let stage = rt.stopStage;
     while (stage < STOP_LADDER.length && elapsed >= STOP_LADDER[stage].after) {
-      signalOwned(rt, procs, STOP_LADDER[stage].signal);
+      if (!(await signalOwned(rt, STOP_LADDER[stage].signal))) break;
       stage += 1;
-    }
-    if (stage !== rt.stopStage)
+      // A later /proc read may fail. Persist each delivered signal before attempting the next.
       await mutateRuntime(id, (cur) => (cur ? { ...cur, stopStage: stage } : cur));
+    }
   };
 
   // 失败也要落盘，否则退避没有输入。lastAttemptAt 无论成败都推进。
@@ -290,7 +314,7 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
       rt
         ? {
             ...rt,
-            ...(clearPgid ? { pgid: 0 } : {}),
+            ...(clearPgid ? { pgid: 0, leaderIdentity: undefined } : {}),
             lastAttemptAt: deps.now(),
             failures: rt.failures + 1,
             lastError: errText(err).slice(0, 500)
@@ -314,7 +338,7 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
       const obs = observationFor(key, procs, rt);
       const reached =
         action === "stop"
-          ? obs.instances.length === 0 && !(await deps.groupExists(rt?.pgid ?? 0))
+          ? obs.instances.length === 0 && (await groupStateOf(rt)) === "absent"
           : obs.instances.some((i) => i.by);
       if (reached || deps.now() >= deadline)
         return {
@@ -333,15 +357,14 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
     // 之间有 await，而且 attach 是绕过 controlRunner 直接进来的。拉起 listener 会去 GitHub 抢
     // 身份，不可逆，值得在最后一刻再证明一次。
     const live = (await deps.scan()).filter((p) => p.dir === key);
-    if (live.length) throw new Error($t("TXT_CODE_RUNNER_ALREADY_SUPERVISED"));
+    const previous = await readRuntime(markerIdOf(key));
+    if (live.length || (await groupStateOf(previous)) !== "absent")
+      throw new Error($t("TXT_CODE_RUNNER_ALREADY_SUPERVISED"));
 
     const { argv, warning } = resolveStartArgv();
     if (warning) logger.error(`[supervisor-process] ${warning}`);
 
     const markerId = markerIdOf(key);
-    const previous = await readRuntime(markerId);
-    if (previous?.dir === key && (await deps.groupExists(previous.pgid)))
-      throw new Error($t("TXT_CODE_RUNNER_ALREADY_SUPERVISED"));
 
     // **意图先落盘，再 spawn。** 反过来会留一个死角：stop 之后再 start，若 spawn 失败，
     // desired 仍是 "stopped"，reconcile 第一句就 return —— 退避重拉永远够不着这个 runner，
@@ -350,6 +373,7 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
       v: 1,
       dir: key,
       pgid: prev?.pgid ?? 0,
+      leaderIdentity: prev?.leaderIdentity,
       startedAt: prev?.startedAt ?? 0,
       lastAttemptAt: deps.now(),
       desired: "running",
@@ -443,9 +467,19 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
       // fork 成功，run.sh 可能下一秒就退出；在这里清零会让崩溃循环的计数在 0/1 之间摆动，
       // 退避永远爬不到上限。清零挪到 reconcile —— 活过 HEALTHY_MS 才算这次启动成功。
       const pid = child.pid;
+      // Persist the group before optional /proc inspection: a failed identity read must not
+      // leave a live child unrecorded and eligible for another spawn.
       await mutateRuntime(markerId, (cur) =>
-        cur ? { ...cur, pgid: pid, startedAt: deps.now() } : cur
+        cur ? { ...cur, pgid: pid, leaderIdentity: undefined, startedAt: deps.now() } : cur
       );
+      try {
+        const leaderIdentity = await deps.readLeader(pid, key);
+        await mutateRuntime(markerId, (cur) =>
+          cur?.pgid === pid ? { ...cur, leaderIdentity } : cur
+        );
+      } catch (err: unknown) {
+        logger.warn(`[supervisor-process] Cannot record leader identity ${pid}: ${errText(err)}`);
+      }
     } finally {
       await fs.close(logFd); // 已交给子进程，父进程这边必须关，否则每次 start 泄一个 fd
     }
@@ -476,7 +510,6 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
     // 防重复拉起由 spawnOnce 首句那次 /proc 复核承担。
     async attach(dir: string) {
       const key = canonicalPath(dir);
-      // spawnOnce validates live processes before changing the existing runtime record.
       await self.start(key); // 失败会抛，置备那一步因此不会报成功而实际没起来
     },
 
@@ -526,7 +559,7 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
       // An existing private record proves this is a recovery, not adoption by directory alone.
       if (!rt || rt.dir !== key || !rt.pgid || rt.desired !== "running" || rt.stopRequestedAt)
         throw refuse();
-      if (await deps.groupExists(rt.pgid)) throw refuse();
+      if ((await groupStateOf(rt)) !== "absent") throw refuse();
       const candidates = (procs: readonly ListenerProc[]) => procs.filter((p) => p.dir === key);
       const procs = await deps.scan();
       const live = candidates(procs);
@@ -539,6 +572,7 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
         !(await deps.verifyGroup(candidate))
       )
         throw refuse();
+      const leaderIdentity = await deps.readLeader(candidate.pgid, key);
       // Recheck after /proc I/O; do not record a vanished or replaced listener.
       const fresh = await deps.scan();
       const current = candidates(fresh);
@@ -546,7 +580,7 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
         current.length !== 1 ||
         current[0].pid !== candidate.pid ||
         current[0].pgid !== candidate.pgid ||
-        (await deps.groupExists(rt.pgid)) ||
+        (await groupStateOf(rt)) !== "absent" ||
         fresh.some((p) => p.pgid === candidate.pgid && p.dir !== key) ||
         !(await deps.verifyGroup(current[0]))
       )
@@ -560,7 +594,14 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
           record.stopRequestedAt
         )
           throw refuse();
-        return { ...record, pgid: candidate.pgid, startedAt: 0, failures: 0, lastError: "" };
+        return {
+          ...record,
+          pgid: candidate.pgid,
+          leaderIdentity,
+          startedAt: 0,
+          failures: 0,
+          lastError: ""
+        };
       });
       logger.info(`[supervisor-process] Reclaimed runner ${id}, pgid=${candidate.pgid}`);
       return toRuntimeState("process", observationFor(key, fresh, await readRuntime(id)), true);
@@ -675,9 +716,7 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
       // 只在「没有任何东西在跑」时才重拉。foreign / conflict 下硬拉就是双托管，而这个判定用的
       // 是与 UI 完全相同的那个函数——不重写一套。
       if (ownershipOf("process", instances) !== "idle") return;
-
-      // run.sh can stay alive while its listener updates or migrates. Do not launch a rival.
-      if (await deps.groupExists(rt.pgid)) return;
+      if ((await groupStateOf(rt)) !== "absent") return;
 
       // 退避判据用 lastAttemptAt，不用 startedAt：一个从来没起来过的 runner 根本没有 startedAt。
       if (deps.now() - rt.lastAttemptAt < backoffFor(rt.failures)) return;

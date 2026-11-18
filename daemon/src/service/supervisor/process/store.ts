@@ -10,6 +10,7 @@ import fs from "fs-extra";
 import path from "path";
 
 import logger from "../../log";
+import { isLeaderIdentity, type LeaderIdentity } from "./group";
 import { readMarker } from "../../runner_marker";
 import { formatEnvLines, readSection, sanitizeEnvVars } from "../../runner_env_vars";
 import type { RunnerEnvSection, RunnerEnvVar } from "mcsmanager-common";
@@ -18,6 +19,8 @@ export interface RunnerRuntime {
   v: 1;
   dir: string; // canonicalPath 归一过
   pgid: number;
+  // Optional for records written before process-group lifecycle tracking.
+  leaderIdentity?: LeaderIdentity;
   // 最近一次**成功**拉起的时刻。只在 spawn 拿到 pid 后更新
   startedAt: number;
   // 最近一次**尝试**拉起的时刻（成功与否都更新）。退避判据用它，不用 startedAt——
@@ -93,6 +96,7 @@ export async function readRuntime(markerId: string): Promise<RunnerRuntime | nul
     v: 1,
     dir: j.dir,
     pgid: Number(j.pgid) || 0,
+    leaderIdentity: isLeaderIdentity(j.leaderIdentity) ? j.leaderIdentity : undefined,
     startedAt: Number(j.startedAt) || 0,
     // 老文件没有 lastAttemptAt：拿 startedAt 顶上，退避至少有个基准
     lastAttemptAt: Number(j.lastAttemptAt) || Number(j.startedAt) || 0,

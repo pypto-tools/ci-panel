@@ -1,7 +1,7 @@
 # Testing Strategy
 
 Rollout is tracked in [#20](https://github.com/pypto-tools/ci-panel/issues/20). This document is
-the reference: tool choices, full config files, and the reasoning behind them.
+the reference: tool choices, full config files, and the reasoning behind them. See also [process runner regressions](docs/testing-process-supervisor.md) (#59).
 
 ## 1. Where we stand
 

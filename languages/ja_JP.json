@@ -1340,5 +1340,9 @@
   "TXT_CODE_9d2e6d5e": "デバイス書き込みレート制限（BPS）",
   "TXT_CODE_2b2ff3ff": "コンテナの特定ブロックデバイスの書き込みレートを制限します。形式: /dev/sda:5MB。複数デバイスはカンマで区切ります。",
   "TXT_CODE_f0dc9eca": "例: /dev/sda:5MB",
-  "TXT_CODE_ungrouped": "Ungrouped"
+  "TXT_CODE_ungrouped": "Ungrouped",
+  "TXT_CODE_RUNNER_RECLAIM": "Reclaim runner",
+  "TXT_CODE_RUNNER_RECLAIM_CONFIRM": "Restore supervision of the running process without restarting it or interrupting jobs? Recovery requires a stale runtime record and one dedicated runner process group. Other states are refused.",
+  "TXT_CODE_RUNNER_RECLAIM_SUCCESS": "Runner supervision restored without a restart.",
+  "TXT_CODE_RUNNER_RECLAIM_REFUSED": "Cannot safely reclaim this runner. Recovery requires a running process with a stale runtime record, an exited old process group, and one dedicated run.sh session. Refresh the state and inspect the node if this persists."
 }

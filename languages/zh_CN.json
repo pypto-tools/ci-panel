@@ -1420,5 +1420,9 @@
   "TXT_CODE_RUNNER_EXPLORER_NODES": "节点列表",
   "TXT_CODE_RUNNER_EXPLORER_RUNNERS": "runner 列表",
   "TXT_CODE_RUNNER_EXPLORER_LOAD_FAILED": "{what}加载失败：{reason}",
-  "TXT_CODE_RUNNER_EXPLORER_LOAD_FAILED_STALE": "{what}加载失败：{reason}。显示的是上一次的数据。"
+  "TXT_CODE_RUNNER_EXPLORER_LOAD_FAILED_STALE": "{what}加载失败：{reason}。显示的是上一次的数据。",
+  "TXT_CODE_RUNNER_RECLAIM": "重新认领 Runner",
+  "TXT_CODE_RUNNER_RECLAIM_CONFIRM": "恢复对当前进程的托管，不重启或中断正在执行的任务？仅在运行记录已失效且存在唯一、独立的 Runner 进程组时允许恢复，其他状态将被拒绝。",
+  "TXT_CODE_RUNNER_RECLAIM_SUCCESS": "已恢复 Runner 托管，进程未重启。",
+  "TXT_CODE_RUNNER_RECLAIM_REFUSED": "无法安全地重新认领此 Runner。恢复要求存在失效的运行记录、旧进程组已退出，且只有一个独立的 run.sh 会话。请刷新状态，若仍失败请检查节点。"
 }

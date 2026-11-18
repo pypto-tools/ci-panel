@@ -27,7 +27,7 @@ import {
   scanRunners,
   unregisterRunner
 } from "../service/runner_scan";
-import { controlRunner, isSupervisorAction } from "../service/supervisor/resolve";
+import { controlRunner, isSupervisorAction, reclaimRunner } from "../service/supervisor/resolve";
 import { $t } from "../i18n";
 import { readRunnerDiag } from "../service/runner_logs";
 import { readRunnerEnv, scopeOfTarget, writeRunnerEnv } from "../service/runner_env";
@@ -152,6 +152,11 @@ routerApp.on("runner/service_control", async (ctx, data) => {
   } catch (err: any) {
     protocol.error(ctx, "runner/service_control", { err: err?.message || String(err) });
   }
+});
+
+// Reclaim never accepts a PID or PGID from the caller.
+routerApp.on("runner/reclaim", async (ctx, data) => {
+  protocol.msg(ctx, "runner/reclaim", await reclaimRunner(data?.dir));
 });
 
 // 读 runner 两个作用域的环境变量——均只读、免 sudo。

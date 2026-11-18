@@ -423,7 +423,8 @@ import type {
   RunnerEnvSection,
   RunnerEnvVar,
   ScannedRunner,
-  SupervisorAction
+  SupervisorAction,
+  RunnerRuntimeState
 } from "mcsmanager-common";
 
 // 启停 systemd 托管的 runner。依赖 daemon 侧的 sudoers 免密白名单
@@ -438,6 +439,11 @@ export const controlRunnerService = useDefineApi<
   url: "/api/runner/service_control",
   method: "POST"
 });
+
+export const reclaimRunner = useDefineApi<
+  { params: { daemonId: string }; data: { dir: string } },
+  RunnerRuntimeState
+>({ url: "/api/runner/reclaim", method: "POST" });
 
 // ---- runner 环境变量：两个作用域 ----
 //   override（线上取值）—— 进「监听进程」：systemd 写 drop-in，进程托管写 daemon 自己的 env

@@ -50,6 +50,10 @@ export function canControl(r: RunnerControlSubject, action: SupervisorAction): C
   return { ok: true };
 }
 
+export function canReclaim(r: RunnerControlSubject): boolean {
+  return r.managed && r.supervisor === "process" && r.runtime?.ownership === "foreign";
+}
+
 // 表驱动而不是 v-if 链：SupervisorKind 加成员时这张 Record 编译失败，正是我们要的提醒。
 const KIND_LABEL: Record<SupervisorKind, string> = {
   systemd: "TXT_CODE_RUNNER_SUPERVISOR_SYSTEMD",

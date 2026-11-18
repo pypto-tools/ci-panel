@@ -72,6 +72,8 @@ export function fakeDeps(over: Partial<ProcessDeps> = {}): FakeDeps {
       clock += ms;
     },
     scan: async () => deps.procs,
+    groupExists: () => false,
+    verifyGroup: async () => true,
     kill: (pid, signal) => {
       deps.signals.push({ pid, signal });
     },

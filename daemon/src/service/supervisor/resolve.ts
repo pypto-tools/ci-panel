@@ -17,6 +17,7 @@ import type { Observation, ObservedInstance } from "./types";
 import type {
   ControlOutcome,
   RunnerOwnership,
+  RunnerRuntimeState,
   SupervisorAction,
   SupervisorKind
 } from "mcsmanager-common";
@@ -178,9 +179,23 @@ export async function controlRunner(
   // 取决于「所有调用方都记得先校验」。
   if (!isSupervisorAction(action))
     throw new Error($t("TXT_CODE_RUNNER_ACTION_UNSUPPORTED", { action }));
+  const { dir, kind, backend, target, keys } = managedControlTarget(dirRaw);
+  return withRunnerLock(keys, "service", async () => {
+    // 闸门在**锁内**重算：判定与执行之间不许有别人插进来的窗口，而 start/attach 是去 GitHub
+    // 抢身份的不可逆副作用。
+    const { byDir, complete } = await observeAll([dir]);
+    const obs = byDir.get(dir);
+    assertActionAllowed(action, ownershipOf(kind, obs?.instances ?? [], complete), kind);
+    // 显式分发而不是 backend[action](dir, target)：stop 的第二个形参是 settleMs，
+    // 索引调用会把 target 塞到那个位置上。
+    return action === "stop" ? backend.stop(dir, undefined, target) : backend[action](dir, target);
+  });
+}
+
+function managedControlTarget(dirRaw: unknown) {
   // canonicalPath 而不是 normalize：等号另一侧是 /proc 里的物理路径，两侧必须同源，
   // 否则观测恒为空 → 归属恒为 idle → 下面那三道闸门全部静默失效。
-  const raw = String(dirRaw || "");
+  const raw = typeof dirRaw === "string" && !dirRaw.includes("\0") ? dirRaw : "";
   if (!path.isAbsolute(raw)) throw new Error($t("TXT_CODE_RUNNER_DIR_NOT_ABSOLUTE"));
   const dir = canonicalPath(raw);
   if (dir === "/") throw new Error($t("TXT_CODE_RUNNER_DIR_IS_ROOT"));
@@ -197,15 +212,21 @@ export async function controlRunner(
 
   // 目录 key 永远占；其余 key 由 prepare 贡献（systemd 占单元名）。通用路径因此不认识单元名
   const keys = [dirKey(dir), ...(target?.lockKeys ?? [])];
+  return { dir, kind, backend, target, keys };
+}
+
+/** Explicit administrator recovery; observation alone never grants ownership. */
+export async function reclaimRunner(dirRaw: unknown): Promise<RunnerRuntimeState> {
+  const { dir, kind, backend, keys } = managedControlTarget(dirRaw);
   return withRunnerLock(keys, "service", async () => {
-    // 闸门在**锁内**重算：判定与执行之间不许有别人插进来的窗口，而 start/attach 是去 GitHub
-    // 抢身份的不可逆副作用。
+    if (kind !== "process" || !backend.reclaim || !readMarker(dir) || declaredFor(dir) !== kind)
+      throw new Error($t("TXT_CODE_RUNNER_RECLAIM_REFUSED"));
     const { byDir, complete } = await observeAll([dir]);
-    const obs = byDir.get(dir);
-    assertActionAllowed(action, ownershipOf(kind, obs?.instances ?? [], complete), kind);
-    // 显式分发而不是 backend[action](dir, target)：stop 的第二个形参是 settleMs，
-    // 索引调用会把 target 塞到那个位置上。
-    return action === "stop" ? backend.stop(dir, undefined, target) : backend[action](dir, target);
+    const instances = byDir.get(dir)?.instances ?? [];
+    if (!complete) throw new Error($t("TXT_CODE_RUNNER_OBSERVE_INCOMPLETE"));
+    if (ownershipOf(kind, instances) !== "foreign")
+      throw new Error($t("TXT_CODE_RUNNER_RECLAIM_REFUSED"));
+    return backend.reclaim(dir, instances[0].id);
   });
 }
 

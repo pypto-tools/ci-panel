@@ -254,7 +254,8 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
   // stop 入口做一次：阶梯要跨几分钟，中间进程组可能已经退出并被别人复用。
   const signalOwned = async (rt: RunnerRuntime, signal: NodeJS.Signals): Promise<boolean> => {
     if (!validPgid(rt.pgid)) return false;
-    if ((await groupStateOf(rt)) === "absent") return false;
+    const groupState = await groupStateOf(rt);
+    if (groupState === "absent" || (rt.leaderIdentity && groupState === "unknown")) return false;
     const leader = rt.leaderIdentity ? await deps.readLeader(rt.pgid, rt.dir) : undefined;
     if (
       leader &&

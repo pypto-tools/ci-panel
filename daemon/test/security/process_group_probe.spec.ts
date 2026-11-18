@@ -221,8 +221,12 @@ describe("recorded group lifetime", () => {
 describe.each([
   { record: "prior-boot", savedBoot: "previous-boot", maySignal: false },
   { record: "current-boot", savedBoot: bootId, maySignal: true },
-  { record: "legacy", savedBoot: undefined, maySignal: true }
-])("stop authorization for a $record record", ({ savedBoot, maySignal }) => {
+  { record: "legacy", savedBoot: undefined, maySignal: true },
+  { record: "unreadable-boot", savedBoot: bootId, maySignal: false, bootReadable: false },
+  { record: "legacy-unreadable-boot", savedBoot: undefined, maySignal: true, bootReadable: false },
+  { record: "legacy-unknown-group", savedBoot: undefined, maySignal: true, probeFails: true }
+])("stop authorization for a $record record", (scenario) => {
+  const { savedBoot, maySignal, bootReadable = true, probeFails = false } = scenario;
   it.each([
     { stage: 0, elapsed: 0, signal: "SIGINT" },
     { stage: 1, elapsed: 31_000, signal: "SIGTERM" },
@@ -231,6 +235,11 @@ describe.each([
     "checks boot identity before $signal with a leaderless group",
     async ({ stage, elapsed, signal }) => {
       await fakeProc();
+      const bootPath = path.join(procRoot, "sys/kernel/random/boot_id");
+      if (!bootReadable) {
+        await fs.remove(bootPath);
+        await fs.ensureDir(bootPath); // EISDIR is reproducible even when tests run as root.
+      }
       await fs.remove(path.join(procRoot, String(PGID)));
       const pid = PGID + 1;
       await fs.outputFile(
@@ -238,7 +247,11 @@ describe.each([
         stat().replace(String(PGID), String(pid))
       );
       const deps = fakeDeps({
-        groupState: (pgid, saved) => inspectProcessGroup(pgid, saved, procRoot, () => true),
+        groupState: (pgid, saved) =>
+          inspectProcessGroup(pgid, saved, procRoot, () => {
+            if (probeFails) throw Object.assign(new Error("Denied"), { code: "EPERM" });
+            return true;
+          }),
         readLeader: (pgid, dir) => readLeaderIdentity(pgid, dir, procRoot)
       });
       deps.procs = [listenerProc({ dir: fixture.dir, pid, pgid: PGID })];
@@ -257,10 +270,20 @@ describe.each([
       });
       deps.advance(elapsed);
       const backend = createProcessSupervisor(deps);
-      if (stage === 0) await backend.stop(fixture.dir, 0);
-      else await backend.reconcileOne(fixture.dir, deps.procs);
+      const advance = async () => {
+        if (stage === 0) await backend.stop(fixture.dir, 0);
+        else await backend.reconcileOne(fixture.dir, deps.procs);
+      };
+      await advance();
       expect(deps.signals).toEqual(maySignal ? [{ pid: -PGID, signal }] : []);
       expect((await readRuntime(fixture.markerId))?.stopStage).toBe(stage + (maySignal ? 1 : 0));
+      if (!bootReadable && savedBoot) {
+        await fs.remove(bootPath);
+        await fs.writeFile(bootPath, bootId);
+        await advance();
+        expect(deps.signals).toEqual([{ pid: -PGID, signal }]);
+        expect((await readRuntime(fixture.markerId))?.stopStage).toBe(stage + 1);
+      }
     }
   );
 });

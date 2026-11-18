@@ -5,6 +5,7 @@ Stop/detach must wait for group exit, preserve its PGID meanwhile, and block man
 Zombie-only groups and prior-boot identities count as stopped.
 Signals require a matching leader boot ID, start ticks and directory, or fresh listener ownership after identity inspection.
 Before every signal, group inspection rejects prior-boot or absent records even when the directory and PGID match a live listener.
+A saved identity with unknown group state keeps stopping pending until inspection succeeds; legacy records retain fresh-listener fallback.
 Process-group existence alone grants no authority to signal it.
 
 - `daemon/test/pure-logic/process_group_lifecycle.spec.ts` covers group lifetime, retry windows, and replacement during identity inspection at every stop stage.

@@ -9,8 +9,9 @@ the reference: tool choices, full config files, and the reasoning behind them.
   `package.json` and `.github/workflows/ci.yml` for the current gates; counts change with each PR.
 - Process scanning specs (`proc_scan_client`, `proc_scan_isolation`, `listener_index`,
   `proc_snapshot_sharing`) exercise bounded scheduling, fresh reads, failures and real workers.
-  `node scripts/release/check-proc-worker.cjs <daemon-dir>` verifies the shipped worker and error
-  recovery; release smoke tests run it too. Unit tests load worker TypeScript through ts-node.
+  Release smoke tests run `node scripts/release/check-proc-worker.cjs <daemon-dir>` for worker
+  startup/recovery; unit tests load worker TypeScript through ts-node.
+  `delete_scan_failure` covers aborting before detach/file removal (even with force) and retry.
 - `frontend/` already has `vitest@0.33.0`, `@vue/test-utils@2.4.1` and `jsdom@22.1.0` installed,
   and `tsconfig.vitest.json` exists — **day one needs no install at all**.
 - ci-panel is not a CRUD app but a remote-execution control plane: it holds GitHub PATs, spawns

@@ -190,15 +190,8 @@ function collectRunnerDirs(
 // Runner.Worker 的托管方式（容器、远端），它会静默退化成「永不 busy」。本方案落地的后端都从
 // 同一份扫描派生，两者恒等；第一个打破这个等式的后端必须同时把这道闸改成读 runtime.busy。
 async function busyRunnerDirs(): Promise<Set<string>> {
-  try {
-    const procs = await scanListenerProcs();
-    return new Set(procs.filter((p) => p.busy).map((p) => p.dir));
-  } catch (err: unknown) {
-    // 扫不动 /proc 时回空集合：这里的语义是「拦不拦这次删除」，而删除本身另有 fail closed
-    // （detach 会复核活体）。观测路径要的是相反的语义，那条路走 observeAll，它会判 unknown。
-    logger.warn(`[runner-scan] /proc 扫描失败，busy 判定按「无」处理: ${errText(err)}`);
-    return new Set();
-  }
+  const procs = await scanListenerProcs();
+  return new Set(procs.filter((p) => p.busy).map((p) => p.dir));
 }
 
 // 从仓库地址提取 owner/repo。与 runner_provision.ts 的 repoSlug 同语义

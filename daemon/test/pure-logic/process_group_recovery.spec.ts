@@ -37,14 +37,14 @@ describe("preserving the runner process group", () => {
   });
 
   it("does not respawn between listener generations while run.sh is alive", async () => {
-    const deps = { ...fakeDeps(), groupExists: () => true };
+    const deps = { ...fakeDeps(), groupState: () => "present" as const };
     await createProcessSupervisor(deps).reconcileOne!(fixture.dir, []);
     expect(deps.spawns).toEqual([]);
     expect(await readRuntime(fixture.markerId)).toEqual(runtime);
   });
 
   it("refuses an explicit start while the recorded group is still alive", async () => {
-    const deps = { ...fakeDeps(), groupExists: () => true };
+    const deps = { ...fakeDeps(), groupState: () => "present" as const };
     await expect(createProcessSupervisor(deps).spawnOnce(fixture.dir)).rejects.toThrow();
     expect(deps.spawns).toEqual([]);
     expect(await readRuntime(fixture.markerId)).toEqual(runtime);
@@ -53,7 +53,7 @@ describe("preserving the runner process group", () => {
 
 describe("stopping between listener generations", () => {
   it("preserves the group and reports unsettled until the launcher exits", async () => {
-    const deps = fakeDeps({ groupExists: () => true });
+    const deps = fakeDeps({ groupState: () => "present" as const });
     const backend = createProcessSupervisor(deps);
     expect((await backend.stop(fixture.dir, 0)).settled).toBe(false);
     expect((await readRuntime(fixture.markerId))?.pgid).toBe(runtime.pgid);

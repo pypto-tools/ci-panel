@@ -48,9 +48,11 @@ describe("restart", () => {
     deps.scan = async () => {
       const r = await readRuntime(fixture.markerId);
       if (r) seen.push(r.desired);
-      const now = deps.procs;
+      return deps.procs;
+    };
+    deps.kill = (pid, signal) => {
+      deps.signals.push({ pid, signal });
       deps.procs = [];
-      return now;
     };
     // Built only now: createProcessSupervisor spreads deps into its own object, so anything
     // assigned onto this one afterwards is invisible to the backend. (procs still works because
@@ -66,10 +68,9 @@ describe("restart", () => {
   it("signals the running listener before starting a new one", async () => {
     const deps = fakeDeps();
     deps.procs = [listenerProc({ dir: fixture.dir, pgid: PGID })];
-    deps.scan = async () => {
-      const now = deps.procs;
+    deps.kill = (pid, signal) => {
+      deps.signals.push({ pid, signal });
       deps.procs = [];
-      return now;
     };
     await createProcessSupervisor(deps).restart(fixture.dir);
     expect(deps.signals.map((s) => s.signal)).toEqual(["SIGINT"]);

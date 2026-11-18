@@ -1,7 +1,7 @@
 # Testing Strategy
 
 Rollout is tracked in [#20](https://github.com/pypto-tools/ci-panel/issues/20). This document is
-the reference: tool choices, full config files, and the reasoning behind them.
+the reference: tool choices, full config files, and the reasoning behind them. See also [process runner regressions](docs/testing-process-supervisor.md) (#59).
 
 ## 1. Where we stand
 
@@ -75,20 +75,14 @@ isolating the runner account's write permissions at the deployment layer.
 
 ### 2.4 Truncated config and swallowed handler errors — `system_storage.ts`, `router_app.ts`
 
-A full disk truncated `data/Config/global.json` because `writeFileSync` applies `O_TRUNC`
-before writing; the async `ENOSPC` rejection then escaped `emitRouter`'s synchronous catch.
-Storage now writes a sibling temp file, fsyncs and renames; `RouterApp.on` forwards rejected
-handlers to `responseError`. Specs: `common/test/storage/atomic_write.spec.ts` (its failure
-truncates before throwing) and `daemon/test/contract/router_error_response.spec.ts`.
-
-### 2.5 Process runner retry windows — issue #59
-
-A missing listener does not imply an exited process group: `run-helper.sh` waits five seconds
-before retrying. Stop/detach must wait for group exit, preserve its PGID meanwhile, and block
-manual or automatic respawn. Zombie-only groups and prior-boot identities count as stopped.
-Signals require listener ownership or matching leader boot ID, start ticks and directory; existence alone grants no authority.
-Specs: `daemon/test/pure-logic/process_group_lifecycle.spec.ts`, `process_retry_window.spec.ts` (real wrapper, five-second retry, no GitHub access), and
-`daemon/test/security/process_group_probe.spec.ts` (PID reuse evidence, probe errors, old records).
+A full disk truncated a node's `data/Config/global.json` to zero bytes (`writeFileSync` applies
+`O_TRUNC` before writing), nearly costing the daemon the key the panel authenticates with — and the
+`ENOSPC` vanished, because an `async` handler signals failure by rejecting and `emitRouter`'s
+`try/catch` only sees synchronous throws. No packet, no log line, an RPC timeout at the panel.
+`StorageSubsystem` now writes a sibling temp file, `fsync`s and renames; `RouterApp.on` wraps each
+handler so a rejection reaches `responseError`. Specs: `common/test/storage/atomic_write.spec.ts`
+(its full-disk stand-in truncates *before* throwing — a mock that only threw would let the old code
+pass) and `daemon/test/contract/router_error_response.spec.ts`.
 
 ## 3. Layers
 
@@ -470,10 +464,14 @@ and it restores the working directory in `afterAll` for exactly this reason.)
 
 ## 11. How to verify the setup itself
 
-1. **Run every suite, then build and type-check every package** (note the prefix):
+Run each of these rather than assuming.
+
+1. **Run every suite, then build and type-check every package** (note the prefix). This is the
+   whole gate, not a subset of it:
 
    ```bash
-   npm run build --prefix common           # FIRST: frontend resolves common/dist
+   npm run build --prefix common           # FIRST: frontend resolves common/dist, so its
+                                           #   suite is meaningless against a stale build
    timeout -k 10 120 npm run test --prefix common
    timeout -k 10 300 npm run test --prefix daemon
    timeout -k 10 300 npm run test --prefix panel
@@ -482,7 +480,8 @@ and it restores the working directory in `afterAll` for exactly this reason.)
    npm run type-check --prefix common      # these three also cover their test/ dirs
    npm run type-check --prefix daemon
    npm run type-check --prefix panel
-   npm run type-check --prefix frontend    # includes frontend specs
+   npm run type-check --prefix frontend    # covers src/**/__tests__ via tsconfig.vitest.json;
+                                           #   also runs inside `build --prefix frontend`
    npm run lint --prefix frontend          # only package with lint; rewrites files (--fix)
 
    npm run build --prefix panel
@@ -490,7 +489,8 @@ and it restores the working directory in `afterAll` for exactly this reason.)
    npm run build --prefix frontend         # this is run-p type-check build-only
    ```
 
-2. **Prove the loop:** confirm each regression assertion fails against broken code before fixing it.
+2. **Prove the loop:** in each package with a suite, first write an assertion that must fail and confirm it
+   **does**, then correct it. A test that passes against broken code tests nothing.
 3. **Handle leaks:** `cd daemon && npx vitest run --reporter=verbose` and confirm the process exits
    on its own. If it hangs, some `setInterval` is missing `.unref()` (§7.1).
 4. **Sandbox:** after the daemon suite, `git status` must be clean. A `logs/` or `data/` directory

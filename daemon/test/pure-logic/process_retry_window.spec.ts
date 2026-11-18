@@ -42,7 +42,7 @@ done
     { mode: 0o700 }
   );
 
-  let child: ChildProcess | undefined;
+  const children: ChildProcess[] = [];
   let pgid = 0;
   let spawns = 0;
   const deps = fakeDeps({
@@ -53,7 +53,8 @@ done
     },
     spawn: (_cmd, _args, options) => {
       spawns++;
-      child = spawn("./run.sh", [process.execPath], options);
+      const child = spawn("./run.sh", [process.execPath], options);
+      children.push(child);
       pgid = child.pid ?? 0;
       return child;
     },
@@ -91,11 +92,19 @@ done
     expect(spawns).toBe(1);
     expect((await readRuntime(fixture.markerId))?.pgid).toBe(pgid);
   } finally {
-    if (child && child.exitCode === null && child.signalCode === null) {
-      const exited = once(child, "exit");
-      // TERM kills the test listener; the wrapper traps it and reaps its child before exit.
-      process.kill(-pgid, "SIGTERM");
-      await exited;
-    }
+    await Promise.all(
+      children.map(async (child) => {
+        if (!child.pid) return;
+        const exited =
+          child.exitCode === null && child.signalCode === null ? once(child, "exit") : undefined;
+        try {
+          // TERM kills the test listener; the wrapper traps it and reaps its child before exit.
+          process.kill(-child.pid, "SIGTERM");
+        } catch (err: unknown) {
+          if ((err as NodeJS.ErrnoException)?.code !== "ESRCH") throw err;
+        }
+        await exited;
+      })
+    );
   }
 }, 15_000);

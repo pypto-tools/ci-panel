@@ -253,8 +253,6 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
   // stop 入口做一次：阶梯要跨几分钟，中间进程组可能已经退出并被别人复用。
   const signalOwned = async (rt: RunnerRuntime, signal: NodeJS.Signals): Promise<boolean> => {
     if (!validPgid(rt.pgid)) return false;
-    // Reconciliation snapshots may be old after waiting for another runner.
-    const procs = await deps.scan();
     const leader = rt.leaderIdentity ? await deps.readLeader(rt.pgid, rt.dir) : undefined;
     if (
       leader &&
@@ -263,7 +261,11 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
         leader.startTicks !== rt.leaderIdentity.startTicks)
     )
       return false;
-    if (!leader && !procs.some((p) => owns(rt, p))) return false;
+    if (!leader) {
+      // Leader inspection can outlive the group; only fresh listener evidence can authorize a signal.
+      const procs = await deps.scan();
+      if (!procs.some((p) => owns(rt, p))) return false;
+    }
     try {
       deps.kill(-rt.pgid, signal);
       return true;

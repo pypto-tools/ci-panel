@@ -121,6 +121,43 @@ describe("a live group between listeners", () => {
     expect(await readRuntime(fixture.markerId)).toMatchObject({ pgid: PGID, stopStage: 0 });
   });
 
+  it.each([
+    { signal: "SIGINT", stage: 0, elapsed: 0 },
+    { signal: "SIGTERM", stage: 1, elapsed: 31_000 },
+    { signal: "SIGKILL", stage: 2, elapsed: 301_000 }
+  ])(
+    "does not send $signal when the group is replaced during leader inspection",
+    async ({ stage, elapsed }) => {
+      const deps = liveGroup();
+      deps.procs = [listenerProc({ dir: fixture.dir, pgid: PGID })];
+      deps.readLeader = async () => {
+        deps.procs = [listenerProc({ dir: `${fixture.dir}-replacement`, pgid: PGID })];
+        return undefined;
+      };
+      await writeRuntime(
+        fixture.markerId,
+        runtime({ leaderIdentity: identity, stopRequestedAt: deps.now(), stopStage: stage })
+      );
+      deps.advance(elapsed);
+      await createProcessSupervisor(deps).reconcileOne!(fixture.dir, deps.procs);
+      expect(deps.signals).toEqual([]);
+      expect((await readRuntime(fixture.markerId))?.stopStage).toBe(stage);
+    }
+  );
+
+  it("uses fresh owned listener evidence when leader identity is unavailable", async () => {
+    const deps = fakeDeps({ groupState: () => "present", readLeader: async () => undefined });
+    deps.procs = [listenerProc({ dir: fixture.dir, pgid: PGID })];
+    await writeRuntime(
+      fixture.markerId,
+      runtime({ leaderIdentity: identity, stopRequestedAt: deps.now(), stopStage: 2 })
+    );
+    deps.advance(301_000);
+    await createProcessSupervisor(deps).reconcileOne!(fixture.dir, deps.procs);
+    expect(deps.signals).toEqual([{ pid: -PGID, signal: "SIGKILL" }]);
+    expect((await readRuntime(fixture.markerId))?.stopStage).toBe(3);
+  });
+
   it("retries a signal that was denied instead of consuming its rung", async () => {
     const deps = liveGroup();
     deps.procs = [listenerProc({ dir: fixture.dir, pgid: PGID })];

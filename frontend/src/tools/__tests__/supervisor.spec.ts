@@ -3,6 +3,7 @@ import { initI18n } from "@/lang/i18n";
 import type { RunnerOwnership, SupervisorAction, SupervisorKind } from "mcsmanager-common";
 import {
   canControl,
+  canReclaim,
   kindLabel,
   ownershipHint,
   ownershipTag,
@@ -182,5 +183,22 @@ describe("what the row shows", () => {
     });
     expect(serviceOf(r)).toBe("actions.runner.x.service");
     expect(serviceOf(subject())).toBe("");
+  });
+});
+
+describe("explicit process recovery", () => {
+  it("offers recovery for a managed foreign process, including a busy one", () => {
+    const r = withOwnership("foreign");
+    expect(canReclaim(r)).toBe(true);
+    expect(canReclaim({ ...r, runtime: { ...r.runtime!, busy: true } })).toBe(true);
+  });
+  it("never offers recovery for unmanaged, external, conflicted, or unknown runners", () => {
+    const r = withOwnership("foreign");
+    expect(canReclaim({ ...r, managed: false })).toBe(false);
+    expect(canReclaim({ ...r, runtime: null })).toBe(false);
+    for (const supervisor of ["none", "systemd"] as const)
+      expect(canReclaim({ ...r, supervisor })).toBe(false);
+    for (const ownership of ["self", "idle", "conflict", "unknown"] as const)
+      expect(canReclaim(withOwnership(ownership))).toBe(false);
   });
 });

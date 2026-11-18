@@ -12,6 +12,7 @@ import type {
   RunnerEnvSection,
   RunnerEnvVar,
   RunnerRunState,
+  RunnerRuntimeState,
   SupervisorKind
 } from "mcsmanager-common";
 
@@ -105,6 +106,9 @@ export interface RunnerSupervisor {
     dir: string,
     t?: SupervisorTarget
   ): Promise<{ ok: boolean; error?: string; hint?: string }>;
+
+  // Reclaim only the freshly observed instance, without restarting or signalling it.
+  reclaim?(dir: string, instanceId: string): Promise<RunnerRuntimeState>;
 
   start(dir: string, t?: SupervisorTarget): Promise<ControlOutcome>;
   // settleMs 可覆盖：删除路径要的耐心比面板点一次按钮那条路长得多

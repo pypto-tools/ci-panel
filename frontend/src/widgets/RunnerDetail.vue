@@ -21,6 +21,7 @@ import DeleteResultView from "./DeleteResultView.vue";
 import {
   runnerState,
   controlRunnerService,
+  reclaimRunner,
   registerRunners,
   deleteRunner,
   getRunnerEnv,
@@ -33,6 +34,7 @@ import {
 import { t } from "@/lang/i18n";
 import {
   canControl,
+  canReclaim,
   kindLabel,
   ownershipHint,
   ownershipTag,
@@ -137,6 +139,30 @@ function confirmControl(action: "start" | "stop" | "restart") {
     okType: "danger",
     cancelText: "取消",
     onOk: () => doControl(action)
+  });
+}
+
+function confirmReclaim() {
+  const r = runner.value;
+  if (!r || !canReclaim(r)) return;
+  Modal.confirm({
+    title: t("TXT_CODE_RUNNER_RECLAIM"),
+    icon: () => h(ExclamationCircleOutlined),
+    content: t("TXT_CODE_RUNNER_RECLAIM_CONFIRM"),
+    okText: t("TXT_CODE_RUNNER_RECLAIM"),
+    onOk: async () => {
+      acting.value = true;
+      try {
+        const { execute } = reclaimRunner();
+        await execute({ params: { daemonId: daemonId.value }, data: { dir: r.dir } });
+        message.success(t("TXT_CODE_RUNNER_RECLAIM_SUCCESS"));
+        await loadState(true);
+      } catch (err: unknown) {
+        message.error(err instanceof Error ? err.message : String(err));
+      } finally {
+        acting.value = false;
+      }
+    }
   });
 }
 
@@ -433,6 +459,15 @@ function goBack() {
             <!-- 禁用与理由都由 canControl 说了算。tooltip 包一层 span：禁用的按钮不派发
                  鼠标事件，直接挂在按钮上的提示不会显示，而这里的理由正是用户最需要看的 -->
             <a-space>
+              <a-button
+                v-if="canReclaim(runner)"
+                type="primary"
+                size="small"
+                :loading="acting"
+                @click="confirmReclaim"
+              >
+                {{ t("TXT_CODE_RUNNER_RECLAIM") }}
+              </a-button>
               <a-tooltip v-if="!running" :title="controlCheck('start').reason">
                 <span>
                   <a-button

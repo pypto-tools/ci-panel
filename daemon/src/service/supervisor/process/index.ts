@@ -28,6 +28,7 @@ import type {
   SupervisorTarget
 } from "../types";
 import { observationFor, owns } from "./observe";
+import { isDedicatedRunnerGroup, processGroupExists } from "./group";
 import {
   listenerEnvFor,
   markerIdOf,
@@ -38,7 +39,6 @@ import {
   removeRuntime,
   rotateAndOpenRunLog,
   writeListenerEnvFile,
-  writeRuntime,
   type RunnerRuntime
 } from "./store";
 import type {
@@ -166,6 +166,8 @@ export type SpawnFn = (
 
 export interface ProcessDeps {
   scan: () => Promise<ListenerProc[]>;
+  groupExists: (pgid: number) => boolean | Promise<boolean>;
+  verifyGroup: (listener: ListenerProc) => Promise<boolean>;
   kill: (pid: number, signal: NodeJS.Signals) => void;
   now: () => number;
   spawn: SpawnFn;
@@ -217,6 +219,8 @@ export function resetChildPriority(pid: number): void {
 
 const DEFAULT_DEPS: ProcessDeps = {
   scan: () => scanListenerProcs(),
+  groupExists: processGroupExists,
+  verifyGroup: isDedicatedRunnerGroup,
   kill: (pid, signal) => void process.kill(pid, signal),
   now: () => Date.now(),
   spawn: nodeSpawn,
@@ -256,6 +260,8 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
   ): Promise<void> => {
     const id = markerIdOf(rt.dir);
     if (!procs.some((p) => owns(rt, p))) {
+      // The launcher may be between listener generations. Preserve its identity until it exits.
+      if (await deps.groupExists(rt.pgid)) return;
       // 进程已经没了：收工，清掉停止态但**保留 desired:"stopped"**，否则下一拍又拉起来
       await mutateRuntime(id, (cur) =>
         cur ? { ...cur, stopRequestedAt: 0, stopStage: 0, pgid: 0 } : cur
@@ -307,7 +313,9 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
       const rt = await readRuntime(markerIdOf(key));
       const obs = observationFor(key, procs, rt);
       const reached =
-        action === "stop" ? obs.instances.length === 0 : obs.instances.some((i) => i.by);
+        action === "stop"
+          ? obs.instances.length === 0 && !(await deps.groupExists(rt?.pgid ?? 0))
+          : obs.instances.some((i) => i.by);
       if (reached || deps.now() >= deadline)
         return {
           dir: key,
@@ -331,6 +339,9 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
     if (warning) logger.error(`[supervisor-process] ${warning}`);
 
     const markerId = markerIdOf(key);
+    const previous = await readRuntime(markerId);
+    if (previous?.dir === key && (await deps.groupExists(previous.pgid)))
+      throw new Error($t("TXT_CODE_RUNNER_ALREADY_SUPERVISED"));
 
     // **意图先落盘，再 spawn。** 反过来会留一个死角：stop 之后再 start，若 spawn 失败，
     // desired 仍是 "stopped"，reconcile 第一句就 return —— 退避重拉永远够不着这个 runner，
@@ -465,18 +476,7 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
     // 防重复拉起由 spawnOnce 首句那次 /proc 复核承担。
     async attach(dir: string) {
       const key = canonicalPath(dir);
-      await writeRuntime(markerIdOf(key), {
-        v: 1,
-        dir: key,
-        pgid: 0,
-        startedAt: 0,
-        lastAttemptAt: 0,
-        desired: "running",
-        stopRequestedAt: 0,
-        stopStage: 0,
-        failures: 0,
-        lastError: ""
-      });
+      // spawnOnce validates live processes before changing the existing runtime record.
       await self.start(key); // 失败会抛，置备那一步因此不会报成功而实际没起来
     },
 
@@ -516,6 +516,54 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
         return { ok: false, error: $t("TXT_CODE_RUNNER_STOP_NOT_SETTLED", { dir: key }) };
       await removeRuntime(markerId);
       return { ok: true };
+    },
+
+    async reclaim(dir: string, instanceId: string) {
+      const key = canonicalPath(dir);
+      const id = markerIdOf(key);
+      const rt = await readRuntime(id);
+      const refuse = () => new Error($t("TXT_CODE_RUNNER_RECLAIM_REFUSED"));
+      // An existing private record proves this is a recovery, not adoption by directory alone.
+      if (!rt || rt.dir !== key || !rt.pgid || rt.desired !== "running" || rt.stopRequestedAt)
+        throw refuse();
+      if (await deps.groupExists(rt.pgid)) throw refuse();
+      const candidates = (procs: readonly ListenerProc[]) => procs.filter((p) => p.dir === key);
+      const procs = await deps.scan();
+      const live = candidates(procs);
+      const candidate = live[0];
+      if (
+        live.length !== 1 ||
+        String(candidate.pid) !== instanceId ||
+        owns(rt, candidate) ||
+        procs.some((p) => p.pgid === candidate.pgid && p.dir !== key) ||
+        !(await deps.verifyGroup(candidate))
+      )
+        throw refuse();
+      // Recheck after /proc I/O; do not record a vanished or replaced listener.
+      const fresh = await deps.scan();
+      const current = candidates(fresh);
+      if (
+        current.length !== 1 ||
+        current[0].pid !== candidate.pid ||
+        current[0].pgid !== candidate.pgid ||
+        (await deps.groupExists(rt.pgid)) ||
+        fresh.some((p) => p.pgid === candidate.pgid && p.dir !== key) ||
+        !(await deps.verifyGroup(current[0]))
+      )
+        throw refuse();
+      await mutateRuntime(id, (record) => {
+        if (
+          !record ||
+          record.dir !== key ||
+          record.pgid !== rt.pgid ||
+          record.desired !== "running" ||
+          record.stopRequestedAt
+        )
+          throw refuse();
+        return { ...record, pgid: candidate.pgid, startedAt: 0, failures: 0, lastError: "" };
+      });
+      logger.info(`[supervisor-process] Reclaimed runner ${id}, pgid=${candidate.pgid}`);
+      return toRuntimeState("process", observationFor(key, fresh, await readRuntime(id)), true);
     },
 
     async start(dir: string) {
@@ -627,6 +675,9 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
       // 只在「没有任何东西在跑」时才重拉。foreign / conflict 下硬拉就是双托管，而这个判定用的
       // 是与 UI 完全相同的那个函数——不重写一套。
       if (ownershipOf("process", instances) !== "idle") return;
+
+      // run.sh can stay alive while its listener updates or migrates. Do not launch a rival.
+      if (await deps.groupExists(rt.pgid)) return;
 
       // 退避判据用 lastAttemptAt，不用 startedAt：一个从来没起来过的 runner 根本没有 startedAt。
       if (deps.now() - rt.lastAttemptAt < backoffFor(rt.failures)) return;

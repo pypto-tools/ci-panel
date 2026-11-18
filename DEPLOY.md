@@ -367,6 +367,27 @@ ExecStart=/usr/bin/taskset -c 0-1 /path/to/node --enable-source-maps --max-old-s
 （内核默认只留 5% 给非实时任务兜底）。对一个 I/O 密集的控制面，它比 `Nice=-10` 多不了多少
 收益，炸的范围却是整台机器。
 
+## Recovering an unclaimed process runner
+
+For a managed runner whose supervision is **process** but whose ownership is **Unclaimed**,
+open its detail page and choose **Reclaim runner**, then confirm. The daemon verifies the
+live process and updates its private runtime record without signalling or restarting it;
+running jobs continue. Refresh the detail page to see **Managed** ownership and restored
+start/stop controls.
+
+Recovery is deliberately limited to a stale runtime record with `desired: running`, an old
+process group that has exited, and exactly one listener in a dedicated `run.sh` session
+owned by the daemon user. It refuses multiple listeners, another supervisor's ownership,
+an incomplete observation, an active stop, a shared shell process group, or missing runtime
+history. A custom `CIP_RUNNER_START` launcher may also require manual investigation. Do not
+kill a busy runner merely to clear the warning; inspect the node and wait for its job to
+finish before any manual restart.
+
+The daemon now retains the recorded group while `run.sh` is alive between listener
+updates/restarts, so it does not start a competing listener in that interval. A repeated
+attach also preserves the existing runtime record when refused. A `.runner_migrated` file
+alone is not proof of process ownership and never triggers automatic reassignment.
+
 ## 排障
 
 | 现象 | 先查这里 |

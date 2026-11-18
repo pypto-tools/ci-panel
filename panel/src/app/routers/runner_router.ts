@@ -738,6 +738,29 @@ router.post(
 );
 
 // [Top-level Permission]
+router.post(
+  "/reclaim",
+  permission({ level: ROLE.ADMIN }),
+  validator({ query: { daemonId: String } }),
+  async (ctx) => {
+    const dir: unknown = ctx.request.body?.dir;
+    if (!isForwardableDir(dir)) {
+      ctx.status = 400;
+      ctx.body = { err: $t("TXT_CODE_RUNNER_DIR_NOT_ABSOLUTE") };
+      return;
+    }
+    try {
+      const remote = RemoteServiceSubsystem.getInstance(String(ctx.query.daemonId));
+      ctx.body = await new RemoteRequest(remote).request("runner/reclaim", { dir }, 30000);
+    } catch (err: unknown) {
+      logger.warn(`Runner reclaim failed: ${errMessage(err)}`);
+      ctx.status = 500;
+      ctx.body = { err: errMessage(err) };
+    }
+  }
+);
+
+// [Top-level Permission]
 // 批量启停/重启 runner。每个独立、无共享锁，panel 侧有界并发扇出到单个 service_control；
 // 没有目录的项直接跳过。逐个 catch 汇总结果，互不影响。
 router.post(

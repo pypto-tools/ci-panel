@@ -85,7 +85,7 @@ done
     expect(outcome.settled).toBe(false);
     expect(await deps.scan()).toEqual([]);
     expect(processGroupState(pgid)).toBe("present");
-    await backend.reconcileOne!(fixture.dir, []);
+    await backend.reconcileOne(fixture.dir, []);
     expect((await readRuntime(fixture.markerId))?.pgid).toBe(pgid);
     await waitForFile(ready);
     expect(Number(await fs.readFile(ready, "utf8"))).not.toBe(firstPid);

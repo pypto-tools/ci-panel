@@ -242,6 +242,7 @@ export interface ProcessSupervisor extends RunnerSupervisor {
   // 只拉起、不等到位。reconcile 用它：start() 结尾要 settle 8 秒，而 tick 是串行且防重入的，
   // N 个起不来的 runner 会把有效周期拉到 8N 秒 —— 自动重拉反过来把自动停止饿死。
   spawnOnce(dir: string, t?: SupervisorTarget): Promise<void>;
+  reconcileOne(dir: string, procs: readonly ListenerProc[], t?: SupervisorTarget): Promise<void>;
 }
 
 export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): ProcessSupervisor {
@@ -253,6 +254,7 @@ export function createProcessSupervisor(overrides: Partial<ProcessDeps> = {}): P
   // stop 入口做一次：阶梯要跨几分钟，中间进程组可能已经退出并被别人复用。
   const signalOwned = async (rt: RunnerRuntime, signal: NodeJS.Signals): Promise<boolean> => {
     if (!validPgid(rt.pgid)) return false;
+    if ((await groupStateOf(rt)) === "absent") return false;
     const leader = rt.leaderIdentity ? await deps.readLeader(rt.pgid, rt.dir) : undefined;
     if (
       leader &&

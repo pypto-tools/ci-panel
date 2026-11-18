@@ -51,7 +51,7 @@ describe("a live group between listeners", () => {
     const deps = liveGroup();
     await writeRuntime(fixture.markerId, runtime({ stopRequestedAt: deps.now(), stopStage: 1 }));
     deps.advance(31_000);
-    await createProcessSupervisor(deps).reconcileOne!(fixture.dir, []);
+    await createProcessSupervisor(deps).reconcileOne(fixture.dir, []);
     expect(await readRuntime(fixture.markerId)).toMatchObject({
       pgid: PGID,
       stopStage: 1,
@@ -63,7 +63,7 @@ describe("a live group between listeners", () => {
 
   it("does not automatically respawn beside a live wrapper", async () => {
     const deps = liveGroup();
-    await createProcessSupervisor(deps).reconcileOne!(fixture.dir, []);
+    await createProcessSupervisor(deps).reconcileOne(fixture.dir, []);
     expect(deps.spawns).toHaveLength(0);
   });
 
@@ -105,7 +105,7 @@ describe("a live group between listeners", () => {
       runtime({ leaderIdentity: identity, stopRequestedAt: deps.now(), stopStage: 1 })
     );
     deps.advance(31_000);
-    await createProcessSupervisor(deps).reconcileOne!(fixture.dir, []);
+    await createProcessSupervisor(deps).reconcileOne(fixture.dir, []);
     expect(deps.signals).toEqual([{ pid: -PGID, signal: "SIGTERM" }]);
     expect((await readRuntime(fixture.markerId))?.stopStage).toBe(2);
   });
@@ -139,7 +139,7 @@ describe("a live group between listeners", () => {
         runtime({ leaderIdentity: identity, stopRequestedAt: deps.now(), stopStage: stage })
       );
       deps.advance(elapsed);
-      await createProcessSupervisor(deps).reconcileOne!(fixture.dir, deps.procs);
+      await createProcessSupervisor(deps).reconcileOne(fixture.dir, deps.procs);
       expect(deps.signals).toEqual([]);
       expect((await readRuntime(fixture.markerId))?.stopStage).toBe(stage);
     }
@@ -153,7 +153,7 @@ describe("a live group between listeners", () => {
       runtime({ leaderIdentity: identity, stopRequestedAt: deps.now(), stopStage: 2 })
     );
     deps.advance(301_000);
-    await createProcessSupervisor(deps).reconcileOne!(fixture.dir, deps.procs);
+    await createProcessSupervisor(deps).reconcileOne(fixture.dir, deps.procs);
     expect(deps.signals).toEqual([{ pid: -PGID, signal: "SIGKILL" }]);
     expect((await readRuntime(fixture.markerId))?.stopStage).toBe(3);
   });
@@ -193,7 +193,7 @@ describe("a live group between listeners", () => {
     const stale = [listenerProc({ dir: fixture.dir, pgid: PGID })];
     await writeRuntime(fixture.markerId, runtime({ stopRequestedAt: deps.now(), stopStage: 1 }));
     deps.advance(31_000);
-    await createProcessSupervisor(deps).reconcileOne!(fixture.dir, stale);
+    await createProcessSupervisor(deps).reconcileOne(fixture.dir, stale);
     expect(deps.signals).toEqual([]);
     expect((await readRuntime(fixture.markerId))?.stopStage).toBe(1);
   });
@@ -207,7 +207,7 @@ describe("a live group between listeners", () => {
       }
     });
     await writeRuntime(fixture.markerId, runtime({ leaderIdentity: identity }));
-    await createProcessSupervisor(deps).reconcileOne!(fixture.dir, []);
+    await createProcessSupervisor(deps).reconcileOne(fixture.dir, []);
     expect(seen).toEqual([identity, identity]);
     expect(deps.spawns).toHaveLength(1);
   });
@@ -222,11 +222,11 @@ describe("a live group between listeners", () => {
     await writeRuntime(fixture.markerId, runtime({ stopRequestedAt: deps.now() }));
     deps.advance(31_000);
     const backend = createProcessSupervisor(deps);
-    await expect(backend.reconcileOne!(fixture.dir, [])).rejects.toThrow(
+    await expect(backend.reconcileOne(fixture.dir, [])).rejects.toThrow(
       "Proc temporarily unavailable"
     );
     expect((await readRuntime(fixture.markerId))?.stopStage).toBe(1);
-    await backend.reconcileOne!(fixture.dir, []);
+    await backend.reconcileOne(fixture.dir, []);
     expect(deps.signals).toEqual([
       { pid: -PGID, signal: "SIGINT" },
       { pid: -PGID, signal: "SIGTERM" }
@@ -250,10 +250,10 @@ describe("a live group between listeners", () => {
     expect(deps.signals).toEqual([{ pid: -PGID, signal: "SIGINT" }]);
     expect(deps.spawns).toHaveLength(0);
     alive = false;
-    await backend.reconcileOne!(fixture.dir, []);
-    await backend.reconcileOne!(fixture.dir, []);
+    await backend.reconcileOne(fixture.dir, []);
+    await backend.reconcileOne(fixture.dir, []);
     deps.procs = [listenerProc({ dir: fixture.dir, pgid: 4242 })];
-    await backend.reconcileOne!(fixture.dir, deps.procs);
+    await backend.reconcileOne(fixture.dir, deps.procs);
     expect(deps.spawns).toHaveLength(1);
     expect((await readRuntime(fixture.markerId))?.desired).toBe("running");
   });
